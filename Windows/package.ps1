@@ -1,4 +1,4 @@
-$ErrorActionPreference = 'Stop'
+﻿$ErrorActionPreference = 'Stop'
 $shareRoot = Join-Path $PSScriptRoot 'share'
 $packageName = 'DogSC-Windows-Trial-' + (Get-Date -Format 'yyyyMMdd-HHmmss')
 $packageRoot = Join-Path $shareRoot $packageName

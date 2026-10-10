@@ -18,42 +18,54 @@ using D=System.Drawing;
 namespace DogSC.Replica {
  public sealed class CaptureSession {
   public Process Process;public Task<string> Errors;public Task Progress;public string Backend;
-  public int Frames,Duplicated,Dropped;public double OutputSeconds,StartupSeconds;public readonly Stopwatch Clock=new Stopwatch();
+  public int Frames,Duplicated,Dropped;public double OutputSeconds,StartupSeconds;public bool HardwareEncoding;public readonly Stopwatch Clock=new Stopwatch();
   internal TaskCompletionSource<bool> Ready=new TaskCompletionSource<bool>();
   public double CpuSeconds {get{try{return Process.TotalProcessorTime.TotalSeconds;}catch{return 0;}}}
  }
  public static class CaptureEngine {
   [DllImport("user32.dll")]static extern IntPtr MonitorFromPoint(Native.Point point,uint flags);
-  static Task<bool> hardware;
-  public static Task<bool> HardwareAvailable(){if(hardware==null)hardware=Task.Run(()=>{
-   try{using(var p=Media.Start("ffmpeg","-v error -f lavfi -i color=size=640x360:rate=30 -frames:v 2 -an -c:v h264_nvenc -preset p1 -f null -",false)){var err=p.StandardError.ReadToEndAsync();if(!p.WaitForExit(8000)){p.Kill();return false;}return p.ExitCode==0;}}catch{return false;}
-  });return hardware;}
-  class Plan{public string Input,Filter,Encoding,Name;}
-  static IEnumerable<Plan> Plans(IntPtr target,D.Rectangle area,int fps,bool nvenc){
-   string gpu="-c:v h264_nvenc -preset p1 -tune ll -rc vbr -cq 18 -b:v 0 -bf 0 -delay 0 -zerolatency 1";
-   string software="-c:v libx264 -preset ultrafast -crf 18 -threads 4 -pix_fmt yuv420p";
+  static readonly object probeLock=new object();static readonly Dictionary<string,Task<bool>> probes=new Dictionary<string,Task<bool>>();
+  static readonly HashSet<string> incompatiblePlans=new HashSet<string>();
+  static Task<bool> Probe(string encoder,uint vendor,string options){lock(probeLock){Task<bool> probe;if(probes.TryGetValue(encoder,out probe))return probe;probe=Task.Run(()=>{if(!DesktopDuplication.HasVendor(vendor))return false;try{using(var p=Media.Start("ffmpeg","-v error -f lavfi -i color=size=640x360:rate=30 -frames:v 4 -an -c:v "+encoder+" "+options+" -f null -",false)){var error=p.StandardError.ReadToEndAsync();if(!p.WaitForExit(5000)){p.Kill();p.WaitForExit();return false;}return p.ExitCode==0;}}catch{return false;}});probes[encoder]=probe;return probe;}}
+  public static Task<bool> HardwareAvailable(){return Probe("h264_nvenc",0x10DE,"-preset p1");}
+  static Task<bool> AmdAvailable(){return Probe("h264_amf",0x1002,"-quality speed");}
+  static Task<bool> IntelAvailable(){return Probe("h264_qsv",0x8086,"-preset veryfast");}
+  public static Task Prewarm(){return Task.WhenAll(HardwareAvailable(),AmdAvailable(),IntelAvailable());}
+  class Plan{public string Input,Filter,Encoding,Name,Device="";}
+  static IEnumerable<Plan> Plans(IntPtr target,D.Rectangle area,int fps,bool nvenc,bool continuous,bool legacy,bool amf,bool qsv){
+   string gpu="-c:v h264_nvenc -preset p1 -tune ll -rc vbr -cq 18 -b:v 0 -bf 0 "+(legacy?"-delay 0 -zerolatency 1":"-rc-lookahead 0 -surfaces 4 -delay 1 -zerolatency 1 -multipass disabled");
+   string software="-c:v libx264 -preset ultrafast -crf 18 -threads "+Math.Min(4,Math.Max(1,Environment.ProcessorCount/4))+" -pix_fmt yuv420p";
+   string amd="-c:v h264_amf -usage lowlatency -quality speed -rc cqp -qp_i 18 -qp_p 18 -bf 0",intel="-c:v h264_qsv -preset veryfast -global_quality 18 -look_ahead 0 -async_depth 4 -bf 0 -pix_fmt nv12";
    string source="gfxcapture=max_framerate="+fps+":capture_cursor=0:capture_border=0:display_border=0:width="+area.Width+":height="+area.Height;
    if(target!=IntPtr.Zero)source+=":hwnd="+target.ToInt64();else{var screen=System.Windows.Forms.Screen.FromRectangle(area).Bounds;var center=new Native.Point {X=area.X+area.Width/2,Y=area.Y+area.Height/2};source+=":hmonitor="+MonitorFromPoint(center,2).ToInt64()+":crop_left="+Math.Max(0,area.X-screen.X)+":crop_top="+Math.Max(0,area.Y-screen.Y)+":crop_right="+Math.Max(0,screen.Right-area.Right)+":crop_bottom="+Math.Max(0,screen.Bottom-area.Bottom);}
-   if(nvenc){yield return new Plan {Input="",Filter=source+"[video]",Encoding=gpu,Name="Windows 图形捕获 · NVIDIA 硬件编码"};yield return new Plan {Input="",Filter=source+",hwdownload,format=bgra[video]",Encoding=gpu+" -pix_fmt bgra",Name="Windows 图形捕获 · NVIDIA 硬件编码（跨显卡）"};}
-   yield return new Plan {Input="",Filter=source+",hwdownload,format=bgra[video]",Encoding=software,Name="Windows 图形捕获 · CPU 编码"};
+   if(continuous&&target==IntPtr.Zero){var screen=System.Windows.Forms.Screen.FromRectangle(area);var selection=DesktopDuplication.Find(MonitorFromPoint(new Native.Point {X=area.X+area.Width/2,Y=area.Y+area.Height/2},2));if(selection!=null){string device="-init_hw_device d3d11va=dogsc:"+selection[0]+" -filter_hw_device dogsc ";string dda="ddagrab=output_idx="+selection[1]+":framerate="+fps+":dup_frames=1:draw_mouse=0:video_size="+area.Width+"x"+area.Height+":offset_x="+(area.X-screen.Bounds.X)+":offset_y="+(area.Y-screen.Bounds.Y);
+    uint vendor=DesktopDuplication.Vendor(selection[0]);if(amf&&vendor==0x1002)yield return new Plan {Input="",Device=device,Filter=dda+"[video]",Encoding=amd,Name="桌面复制捕获 · AMD 硬件编码"};
+    if(nvenc){if(legacy||vendor==0||vendor==0x10DE)yield return new Plan {Input="",Device=device,Filter=dda+"[video]",Encoding=gpu,Name="桌面复制捕获 · NVIDIA 硬件编码"};yield return new Plan {Input="",Device=device,Filter=dda+",hwdownload,format=bgra,hwupload_cuda=device=0[video]",Encoding=gpu,Name="桌面复制捕获 · NVIDIA 硬件编码（跨显卡）"};}if(amf&&vendor==0x1002)yield return new Plan {Input="",Device=device,Filter=dda+",hwdownload,format=bgra[video]",Encoding=amd+" -pix_fmt nv12",Name="桌面复制捕获 · AMD 兼容硬件编码"};if(qsv)yield return new Plan {Input="",Device=device,Filter=dda+",hwdownload,format=bgra[video]",Encoding=intel,Name="桌面复制捕获 · Intel 硬件编码"};yield return new Plan {Input="",Device=device,Filter=dda+",hwdownload,format=bgra[video]",Encoding=software,Name="桌面复制捕获 · CPU 编码"};}}
+   if(!continuous){if(nvenc){yield return new Plan {Input="",Filter=source+"[video]",Encoding=gpu,Name="Windows 图形捕获 · NVIDIA 硬件编码"};yield return new Plan {Input="",Filter=source+",hwdownload,format=bgra[video]",Encoding=gpu+" -pix_fmt bgra",Name="Windows 图形捕获 · NVIDIA 硬件编码（跨显卡）"};}
+    yield return new Plan {Input="",Filter=source+",hwdownload,format=bgra[video]",Encoding=software,Name="Windows 图形捕获 · CPU 编码"};}
    string gdi="-thread_queue_size 4 -f gdigrab -framerate "+fps+" -draw_mouse 0 "+(target==IntPtr.Zero?"-offset_x "+area.X+" -offset_y "+area.Y+" -video_size "+area.Width+"x"+area.Height+" ":"")+"-i "+Media.Q(target==IntPtr.Zero?"desktop":"hwnd="+target.ToInt64())+" ";
    if(nvenc)yield return new Plan {Input=gdi,Filter="",Encoding=gpu+" -pix_fmt bgra",Name="兼容捕获 · NVIDIA 硬件编码"};
+   if(amf)yield return new Plan {Input=gdi,Filter="",Encoding=amd+" -pix_fmt nv12",Name="兼容捕获 · AMD 硬件编码"};
+   if(qsv)yield return new Plan {Input=gdi,Filter="",Encoding=intel,Name="兼容捕获 · Intel 硬件编码"};
    yield return new Plan {Input=gdi,Filter="",Encoding=software,Name="兼容捕获 · CPU 编码"};
   }
-  public static async Task<CaptureSession> Start(IntPtr target,D.Rectangle area,int fps,string microphone,string output,Action<string> status){
-   bool nvenc=await HardwareAvailable();var failures=new List<string>();
-   foreach(var plan in Plans(target,area,fps,nvenc)){
-    status(plan.Name+" · 正在启动…");string args="-hide_banner -y -stats_period 0.5 -progress pipe:1 -filter_threads 2 -filter_complex_threads 2 "+plan.Input;
+  public static Task<CaptureSession> Start(IntPtr target,D.Rectangle area,int fps,string microphone,string output,Action<string> status,bool continuous=false){return StartCore(target,area,fps,microphone,output,status,continuous,false);}
+  internal static Task<CaptureSession> StartBenchmark(D.Rectangle area,int fps,string output,bool legacy){return StartCore(IntPtr.Zero,area,fps,null,output,message=>{},true,legacy);}
+  static async Task<CaptureSession> StartCore(IntPtr target,D.Rectangle area,int fps,string microphone,string output,Action<string> status,bool continuous,bool legacy){
+   if(!legacy)await Prewarm();bool nvenc=await HardwareAvailable(),amf=!legacy&&await AmdAvailable(),qsv=!legacy&&await IntelAvailable();var failures=new List<string>();
+   foreach(var plan in Plans(target,area,fps,nvenc,continuous,legacy,amf,qsv)){
+    string planKey=plan.Device+plan.Name+"/"+area.Width+"x"+area.Height;bool incompatible;lock(probeLock)incompatible=incompatiblePlans.Contains(planKey);if(!legacy&&incompatible){failures.Add(plan.Name+": 本次运行已检测到不兼容，直接回退。");continue;}
+    status(plan.Name+" · 正在启动…");string args="-hide_banner -y -nostats -loglevel warning -stats_period 0.25 -progress pipe:1 -filter_threads 2 -filter_complex_threads 2 "+plan.Device+plan.Input;
     int audioInput=string.IsNullOrEmpty(plan.Input)?0:1;if(microphone!=null)args+="-thread_queue_size 8 -f dshow -i "+Media.Q("audio="+microphone)+" ";
     if(plan.Filter.Length>0)args+="-filter_complex "+Media.Q(plan.Filter)+" -map [video] ";else args+="-map 0:v -vf pad=ceil(iw/2)*2:ceil(ih/2)*2 ";
     if(microphone!=null)args+="-map "+audioInput+":a -c:a aac ";
     // Commit complete fragments while recording, so an interrupted encoder leaves playable footage.
-    args+=plan.Encoding+" -r "+fps+" -fps_mode cfr -g "+fps+" -flush_packets 1 -movflags +frag_keyframe+empty_moov+default_base_moof -frag_duration 500000 "+Media.Q(output);
-    var session=new CaptureSession {Backend=plan.Name};try{
-     session.Process=Media.Start("ffmpeg",args,true);try{session.Process.PriorityClass=ProcessPriorityClass.BelowNormal;}catch{}session.Clock.Start();session.Errors=session.Process.StandardError.ReadToEndAsync();session.Progress=ReadProgress(session);
+    args+=plan.Encoding+" -r "+fps+" -fps_mode cfr -g "+fps+" -flush_packets 1 -movflags +frag_keyframe+empty_moov+default_base_moof+negative_cts_offsets -frag_duration 500000 "+Media.Q(output);
+    var session=new CaptureSession {Backend=plan.Name,HardwareEncoding=!plan.Encoding.Contains("libx264")};try{
+     session.Process=Media.Start("ffmpeg",args,true);try{session.Process.PriorityClass=session.HardwareEncoding&&!legacy?ProcessPriorityClass.Normal:ProcessPriorityClass.BelowNormal;}catch{}session.Clock.Start();session.Errors=session.Process.StandardError.ReadToEndAsync();session.Progress=ReadProgress(session);
      var exited=Task.Run(()=>session.Process.WaitForExit());await Task.WhenAny(session.Ready.Task,exited,Task.Delay(8000));
      if(session.Ready.Task.IsCompleted&&!session.Process.HasExited){File.WriteAllText(Path.Combine(Path.GetDirectoryName(output),"capture-backend.txt"),plan.Name+"\n"+string.Join("\n",failures));return session;}
-     if(!session.Process.HasExited){session.Process.Kill();await exited;}failures.Add(plan.Name+": "+await session.Errors);File.WriteAllText(Path.Combine(Path.GetDirectoryName(output),"capture-attempts.txt"),string.Join("\n",failures));session.Process.Dispose();
+     if(!session.Process.HasExited){session.Process.Kill();await exited;}string error=await session.Errors;if(!legacy&&(error.Contains("AMFConverter-Init() failed")||error.Contains("no encode device")||error.Contains("No such filter")||error.Contains("Unknown encoder")))lock(probeLock)incompatiblePlans.Add(planKey);failures.Add(plan.Name+": "+error);File.WriteAllText(Path.Combine(Path.GetDirectoryName(output),"capture-attempts.txt"),string.Join("\n",failures));session.Process.Dispose();
     }catch(Exception ex){failures.Add(plan.Name+": "+ex.Message);if(session.Process!=null){try{if(!session.Process.HasExited)session.Process.Kill();}catch{}session.Process.Dispose();}}
    }
    throw new Exception("无法启动录制。\n"+string.Join("\n",failures));
@@ -68,9 +80,9 @@ namespace DogSC.Replica {
    var imported=await Task.Run(()=>StudioMedia.Import(output));if(imported.Duration<=0||imported.Width<16||imported.Height<16)throw new Exception("录制文件没有可播放的画面，诊断已保留在录制目录。");
    return interrupted;
   }
-  static async Task ReadProgress(CaptureSession session){string line;try{while((line=await session.Process.StandardOutput.ReadLineAsync())!=null){int at=line.IndexOf('=');if(at<0)continue;string key=line.Substring(0,at),value=line.Substring(at+1);int number;long microseconds;if(key=="frame"&&int.TryParse(value,out number))session.Frames=number;else if(key=="dup_frames"&&int.TryParse(value,out number))session.Duplicated=number;else if(key=="drop_frames"&&int.TryParse(value,out number))session.Dropped=number;else if(key=="out_time_us"&&long.TryParse(value,out microseconds))session.OutputSeconds=microseconds/1000000.0;else if(key=="progress"&&session.Frames>0&&!session.Ready.Task.IsCompleted){session.StartupSeconds=Math.Max(0,session.Clock.Elapsed.TotalSeconds-session.OutputSeconds);session.Ready.TrySetResult(true);}}}catch{} }
+  static async Task ReadProgress(CaptureSession session){string line;try{while((line=await session.Process.StandardOutput.ReadLineAsync())!=null){int at=line.IndexOf('=');if(at<0)continue;string key=line.Substring(0,at),value=line.Substring(at+1);int number;long microseconds;if(key=="frame"&&int.TryParse(value,out number))session.Frames=number;else if(key=="dup_frames"&&int.TryParse(value,out number))session.Duplicated=number;else if(key=="drop_frames"&&int.TryParse(value,out number))session.Dropped=number;else if(key=="out_time_us"&&long.TryParse(value,out microseconds))session.OutputSeconds=microseconds/1000000.0;else if(key=="progress"&&session.Frames>0&&session.OutputSeconds>0&&!session.Ready.Task.IsCompleted){session.StartupSeconds=Math.Max(0,session.Clock.Elapsed.TotalSeconds-session.OutputSeconds);session.Ready.TrySetResult(true);}}}catch{} }
  }
- static class CapturePerformanceTests {
+ static partial class CapturePerformanceTests {
   [DllImport("user32.dll")]static extern bool GetClientRect(IntPtr hwnd,out RECT rect);
   [DllImport("user32.dll")]static extern bool ClientToScreen(IntPtr hwnd,ref Native.Point point);
   [StructLayout(LayoutKind.Sequential)]struct RECT{public int Left,Top,Right,Bottom;}

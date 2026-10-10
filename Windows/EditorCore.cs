@@ -30,6 +30,7 @@ namespace DogSC.Replica {
   public string Source; public int Width; public int Height; public double Duration; public bool Audio;public double FrameRate=30;
   public Appearance Style=new Appearance(); public List<Cut> Cuts=new List<Cut>();public bool IndependentCursor=false;public CursorSettings Cursor=new CursorSettings();public List<OverlayClip> Overlays=new List<OverlayClip>();
   public List<PointerSample> Pointer=new List<PointerSample>(); public List<Zoom> Zooms=new List<Zoom>();
+  public ScreenMotionState ScreenBase;public List<ScreenMotionClip> ScreenMotions=new List<ScreenMotionClip>();
   public double Length { get { return Cuts.Sum(c=>c.Length); } }
   public static JavaScriptSerializer Serializer() { return new JavaScriptSerializer { MaxJsonLength=int.MaxValue }; }
   public string Serialize() { return Serializer().Serialize(this); }
@@ -47,14 +48,14 @@ namespace DogSC.Replica {
    double[] values={Style.Padding,Style.Radius,Style.Shadow,Style.Border,Style.Scale,Style.X,Style.Y,Style.Volume,Style.ZoomScale,Style.Opening};
    if(values.Any(v=>!Finite(v)))throw new Exception("画面参数无效。");
    Style.Padding=Clamp(Style.Padding,0,180);Style.Radius=Clamp(Style.Radius,0,80);Style.Scale=Clamp(Style.Scale,.5,1.5);Style.X=Clamp(Style.X,0,1);Style.Y=Clamp(Style.Y,0,1);Style.Volume=Clamp(Style.Volume,0,1);Style.ZoomScale=Clamp(Style.ZoomScale,1,3);
-   EffectModels.Validate(this);
+   EffectModels.Validate(this);ScreenMotionModels.Validate(this);
   }
   public static bool Finite(double n) {return !double.IsNaN(n)&&!double.IsInfinity(n);}
   public static double Clamp(double n,double lo,double hi) {return Math.Max(lo,Math.Min(hi,n));}
   public double SourceTime(double time,out int index) { double offset=0;index=0;foreach(var c in Cuts){if(time<offset+c.Length||index==Cuts.Count-1)return c.Start+Clamp(time-offset,0,c.Length)*c.Speed;offset+=c.Length;index++;}return 0; }
   public List<PointerSample> TimelinePointer() {
    var result=new List<PointerSample>(); double offset=0;
-   int segment=0;foreach(var cut in Cuts){var prior=Pointer.LastOrDefault(p=>p.Time<=cut.Start);if(prior!=null)result.Add(new PointerSample {Time=offset,X=prior.X,Y=prior.Y,Visible=prior.Visible,CursorKind=prior.CursorKind,Segment=segment});foreach(var p in Pointer.Where(p=>p.Time>=cut.Start&&p.Time<cut.End)) result.Add(new PointerSample {Time=offset+(p.Time-cut.Start)/cut.Speed,X=p.X,Y=p.Y,Click=p.Click,Visible=p.Visible,CursorKind=p.CursorKind,Segment=segment});offset+=cut.Length;segment++;}
+   int segment=0;foreach(var cut in Cuts){var prior=Pointer.LastOrDefault(p=>p.Time<=cut.Start);if(prior!=null)result.Add(new PointerSample {Time=offset,X=prior.X,Y=prior.Y,Visible=prior.Visible,CursorKind=prior.CursorKind,Segment=segment*100000+prior.Segment});foreach(var p in Pointer.Where(p=>p.Time>=cut.Start&&p.Time<cut.End)) result.Add(new PointerSample {Time=offset+(p.Time-cut.Start)/cut.Speed,X=p.X,Y=p.Y,Click=p.Click,Visible=p.Visible,CursorKind=p.CursorKind,Segment=segment*100000+p.Segment});offset+=cut.Length;segment++;}
    return result.OrderBy(p=>p.Time).ToList();
   }
   public void GenerateZooms() {
@@ -133,9 +134,9 @@ namespace DogSC.Replica {
   public static void Run(string args,CancellationToken token) {
    using(var p=Media.Start("ffmpeg",args,false))using(token.Register(()=>{try{p.Kill();}catch{}})) {var errors=p.StandardError.ReadToEndAsync();p.StandardInput.Close();p.WaitForExit();token.ThrowIfCancellationRequested();if(p.ExitCode!=0)throw new Exception(errors.Result);}
   }
-  public static byte[] Frame(string path,double time,int width) {
-   using(var p=Media.Start("ffmpeg","-v error -ss "+Media.N(Math.Max(0,time))+" -i "+Media.Q(path)+" -frames:v 1 -vf scale="+width+":-2 -f image2pipe -vcodec png pipe:1",true)) {
-    var errors=p.StandardError.ReadToEndAsync();using(var ms=new MemoryStream()){p.StandardOutput.BaseStream.CopyTo(ms);p.WaitForExit();if(p.ExitCode!=0)throw new Exception(errors.Result);return ms.ToArray();}
+  public static byte[] Frame(string path,double time,int width,CancellationToken token=default(CancellationToken)) {
+   token.ThrowIfCancellationRequested();using(var p=Media.Start("ffmpeg","-v error -threads 2 -filter_threads 1 -ss "+Media.N(Math.Max(0,time))+" -i "+Media.Q(path)+" -frames:v 1 -vf scale="+width+":-2 -threads 1 -f image2pipe -vcodec png pipe:1",true))using(token.Register(()=>{try{if(!p.HasExited)p.Kill();}catch{}})) {
+    var errors=p.StandardError.ReadToEndAsync();using(var ms=new MemoryStream()){p.StandardOutput.BaseStream.CopyTo(ms);p.WaitForExit();token.ThrowIfCancellationRequested();if(p.ExitCode!=0)throw new Exception(errors.Result);return ms.ToArray();}
    }
   }
   public static string Filter(EditDocument doc,bool audio) {
@@ -154,6 +155,16 @@ namespace DogSC.Replica {
    else if(a.Background=="image"&&wallpaper!=null){double s=Math.Max((double)width/wallpaper.Width,(double)height/wallpaper.Height);g.DrawImage(wallpaper,new RectangleF((float)((width-wallpaper.Width*s)/2),(float)((height-wallpaper.Height*s)/2),(float)(wallpaper.Width*s),(float)(wallpaper.Height*s)));}
    if(a.Background=="dots"){float step=Math.Max(8,width/80f);using(var dot=new SolidBrush(Color.FromArgb(48,80,85,88)))for(float x=step/2;x<width;x+=step)for(float y=step/2;y<height;y+=step)g.FillEllipse(dot,x,y,1.2f,1.2f);}
    var pose=motion.At(time);pose.Opacity*=1-EffectRenderer.Suppression(doc,time);var layout=SceneLayout.Make(doc,width,height,pose);float unit=Math.Min(width,height)/720f;
+   var projection=new ScreenProjection(layout.Frame,ScreenMotionModels.At(doc,time),width,height);
+   if(projection.Identity(layout.Frame)){DrawScreen(g,frame,doc,motion,time,width,height,pose,layout);EffectRenderer.Spotlights(g,doc,time,layout,pose,width,height);}
+   else {var r=layout.Frame;float expansion=(16+(float)a.Border)*unit;r.Inflate(expansion,expansion);var bounds=Rectangle.FromLTRB((int)Math.Floor(r.Left),(int)Math.Floor(r.Top),(int)Math.Ceiling(r.Right),(int)Math.Ceiling(r.Bottom));using(var card=new Bitmap(bounds.Width,bounds.Height,PixelFormat.Format32bppPArgb)){
+    using(var cg=Graphics.FromImage(card)){cg.Clear(Color.Transparent);cg.TranslateTransform(-bounds.X,-bounds.Y);cg.InterpolationMode=g.InterpolationMode;cg.SmoothingMode=g.SmoothingMode;DrawScreen(cg,frame,doc,motion,time,width,height,pose,layout);using(var mask=Round(layout.Frame,layout.Radius)){cg.SetClip(mask);EffectRenderer.Spotlights(cg,doc,time,layout,pose,width,height);}}
+    using(var projected=projection.Warp(card,bounds,width,height))g.DrawImageUnscaled(projected,0,0);
+   }
+   }EffectRenderer.Backdrop(g,canvas,doc,time,width,height);EffectRenderer.Stickers(g,doc,motion,time,width,height);
+  }
+  static void DrawScreen(Graphics g,Bitmap frame,EditDocument doc,MotionEvaluator motion,double time,int width,int height,Pose pose,SceneLayout layout) {
+   var a=doc.Style;float unit=Math.Min(width,height)/720f;
    if(pose.Opacity>.001){
    if(a.Shadow>0)for(int i=10;i>=1;i--){var r=layout.Frame;float spread=i*unit*1.2f;r.Inflate(spread,spread);r.Y+=5*unit;using(var path=Round(r,layout.Radius+spread))using(var b=new SolidBrush(Color.FromArgb((int)(a.Shadow*.13*pose.Opacity),0,0,0)))g.FillPath(b,path);}
    using(var outline=Round(layout.Frame,layout.Radius)){
@@ -165,7 +176,7 @@ namespace DogSC.Replica {
      using(var font=new Font("Microsoft YaHei UI",8*unit,GraphicsUnit.Pixel))using(var b=new SolidBrush(Color.FromArgb((int)(255*pose.Opacity),130,132,136)))using(var format=new StringFormat {Alignment=StringAlignment.Center,LineAlignment=StringAlignment.Center})g.DrawString(doc.Name,font,b,new RectangleF(layout.Frame.X,layout.Frame.Y,layout.Frame.Width,layout.Header),format);}
     g.Restore(state);if(a.Border>0)using(var pen=new Pen(Color.FromArgb((int)(100*pose.Opacity),90,90,95),(float)(a.Border*unit)))g.DrawPath(pen,outline);
    }
-   }EffectRenderer.Spotlights(g,doc,time,layout,pose,width,height);EffectRenderer.Backdrop(g,canvas,doc,time,width,height);EffectRenderer.Stickers(g,doc,motion,time,width,height);
+   }
   }
   public static void Export(EditDocument doc,string output,int height,int fps,Action<double,string> progress,CancellationToken token) {
    doc.Validate();if(File.Exists(output))throw new Exception("请选择一个新的导出文件名。");

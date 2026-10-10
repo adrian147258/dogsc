@@ -1,4 +1,4 @@
-$ErrorActionPreference = 'Stop'
+﻿$ErrorActionPreference = 'Stop'
 $toolsDir = Join-Path $PSScriptRoot 'tools'
 New-Item -ItemType Directory -Force $toolsDir | Out-Null
 $archive = Join-Path $toolsDir 'ffmpeg-release-essentials.zip'
