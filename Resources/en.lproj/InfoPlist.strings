@@ -1,0 +1,4 @@
+/* Keep the app identity in Info.plist so development builds retain "Dev". */
+"CFBundleTypeName" = "DogSC Project";
+"NSCameraUsageDescription" = "Add camera video to screen recordings, including connected Continuity Cameras.";
+"NSMicrophoneUsageDescription" = "Record microphone audio with screen recordings.";

@@ -1,0 +1,28 @@
+.build/
+.swiftpm/
+.tmp/
+.DS_Store
+DerivedData/
+*.xcuserstate
+导出/
+.env
+.env.*
+*.p12
+*.pfx
+*.keychain-db
+*.dogscproject/
+*.silkyproject/
+
+# The upstream macOS signing workflow is not used by this Windows derivative.
+.github/workflows/release.yml
+# Local recording/project data and credentials are never published.
+*.dogscwin
+*.dogscwin.tmp
+*.mp4
+*.mkv
+*.mov
+*.p12
+*.pfx
+*.pem
+*.key
+.vs/

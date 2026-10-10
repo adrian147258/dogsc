@@ -1,0 +1,935 @@
+import Foundation
+
+public enum RecordingSegmentTrimEdge: String, Codable, Equatable, Sendable {
+    case left
+    case right
+}
+
+public enum ProjectTimelineTrack: String, Equatable, Sendable {
+    case primaryRecording
+    case zoom
+    case screenMotion
+    case cameraMotion
+    case mosaic
+    case sticker
+}
+
+public enum ProjectTimelineEditingError: Error, Equatable, Sendable {
+    case invalidSourceSequence
+    case segmentNotFound(UUID)
+    case splitOutsideSegment
+    case duplicateSegmentID(UUID)
+    case trimOutsideSegment(UUID)
+    case cannotRemoveFinalSegment
+    case restoreJunctionNotFound(previous: UUID, next: UUID)
+    case noRestorableSourceGap(previous: UUID, next: UUID)
+    case noRestorableLeadingSourceGap(UUID)
+    case noRestorableTrailingSourceGap(UUID)
+    case cannotMergeDeletedGap(previous: UUID, next: UUID)
+    case cannotMergeDifferentPlaybackRates(previous: UUID, next: UUID)
+    case cannotMergeDifferentAudioOverrides(previous: UUID, next: UUID)
+    case invalidPrimarySegmentAudioOverrides(UUID)
+    case duplicateClipID(track: ProjectTimelineTrack, id: UUID)
+    case missingClip(track: ProjectTimelineTrack, id: UUID)
+    case mismatchedClipID(track: ProjectTimelineTrack, expected: UUID, actual: UUID)
+    case invalidClip(track: ProjectTimelineTrack, id: UUID)
+    case overlappingClips(track: ProjectTimelineTrack, first: UUID, second: UUID)
+}
+
+extension ProjectTimelineEditingError: LocalizedError {
+    public var errorDescription: String? {
+        switch self {
+        case .invalidSourceSequence:
+            return "主录屏片段必须有效、不重复使用源素材且至少保留一段。"
+        case .segmentNotFound:
+            return "找不到要编辑的主片段。"
+        case .splitOutsideSegment:
+            return "拆分点必须位于主录屏片段内部。"
+        case .duplicateSegmentID:
+            return "主片段数据重复，无法继续编辑。"
+        case .trimOutsideSegment:
+            return "裁切点必须位于当前片段内部，且不能裁成空片段。"
+        case .cannotRemoveFinalSegment:
+            return "项目必须至少保留一个主录屏片段。"
+        case .restoreJunctionNotFound:
+            return "找不到要还原的相邻剪切点。"
+        case .noRestorableSourceGap:
+            return "该剪切点没有可还原的源素材。"
+        case .noRestorableLeadingSourceGap:
+            return "开头没有可还原的源素材。"
+        case .noRestorableTrailingSourceGap:
+            return "结尾没有可还原的源素材。"
+        case .cannotMergeDeletedGap:
+            return "该剪切点包含已删除素材，应先还原而不是直接合并。"
+        case .cannotMergeDifferentPlaybackRates:
+            return "相邻片段速度不同，无法直接合并。"
+        case .cannotMergeDifferentAudioOverrides:
+            return "相邻片段的声音设置不同，无法直接合并。"
+        case .invalidPrimarySegmentAudioOverrides:
+            return "当前片段的声音设置无效。"
+        case let .duplicateClipID(track, _):
+            return "\(track.userFacingName)轨道中存在重复片段。"
+        case let .missingClip(track, _):
+            return "\(track.userFacingName)轨道中找不到要编辑的片段。"
+        case let .mismatchedClipID(track, _, _):
+            return "\(track.userFacingName)轨道中的片段已发生变化，请重新选择后再试。"
+        case let .invalidClip(track, _):
+            return "\(track.userFacingName)轨道中存在无效片段。"
+        case let .overlappingClips(track, _, _):
+            return "\(track.userFacingName)轨道中的片段发生重叠。"
+        }
+    }
+}
+
+private extension ProjectTimelineTrack {
+    var userFacingName: String {
+        switch self {
+        case .primaryRecording: "主片段"
+        case .zoom: "缩放"
+        case .screenMotion: "屏幕 3D"
+        case .cameraMotion: "摄像运动"
+        case .mosaic: "打码"
+        case .sticker: "贴图"
+        }
+    }
+}
+
+/// Pure edit decisions for the lightweight primary-recording timeline.
+///
+/// Source ranges remain unique and play at normal speed, while their array
+/// order is the authored output order. Splitting preserves duration; trims,
+/// removal and reordering transform every time-varying track with the edit.
+public enum ProjectTimelineEditing {
+    static let epsilon = 1.0 / 120_000.0
+
+    public static func primarySegmentAudioOverrides(
+        in timeline: ProjectTimeline,
+        segmentID: UUID
+    ) -> PrimarySegmentAudioOverrides {
+        timeline.primarySegmentAudioOverrides[segmentID] ?? PrimarySegmentAudioOverrides()
+    }
+
+    public static func settingPrimarySegmentAudioOverrides(
+        in timeline: ProjectTimeline,
+        segmentID: UUID,
+        overrides: PrimarySegmentAudioOverrides
+    ) throws -> ProjectTimeline {
+        guard primarySegmentIDs(in: timeline.sourceSequence).contains(segmentID) else {
+            throw ProjectTimelineEditingError.segmentNotFound(segmentID)
+        }
+        var result = timeline
+        if overrides.isEmpty {
+            result.primarySegmentAudioOverrides.removeValue(forKey: segmentID)
+        } else {
+            result.primarySegmentAudioOverrides[segmentID] = overrides
+        }
+        try validate(result)
+        return result
+    }
+
+    public static func materialized(
+        _ timeline: ProjectTimeline,
+        fullSourceDuration: TimeInterval
+    ) throws -> ProjectTimeline {
+        try validate(timeline, fullSourceDuration: fullSourceDuration)
+        let map = try TimelineMap(
+            sourceSequence: timeline.sourceSequence,
+            fullSourceDuration: fullSourceDuration
+        )
+        var result = timeline
+        result.sourceSequence = map.materializedSourceSequence()
+        try validate(result)
+        return result
+    }
+
+    /// Repairs projects that were saved by the old ripple implementation with
+    /// a consumed (`progressOffset == 1`) zero-length return at a real source
+    /// gap. Those values encode a one-frame jump, so reopening the project must
+    /// restore the transition just as a newly performed deletion now does.
+    public static func repairingPersistedRippleTransitions(
+        _ timeline: ProjectTimeline,
+        defaultTransitionDuration: TimeInterval = 0.7
+    ) -> ProjectTimeline {
+        guard case let .edited(segments) = timeline.sourceSequence,
+              segments.count > 1 else { return timeline }
+        var output = 0.0
+        var gapJunctions: [TimeInterval] = []
+        for index in segments.indices {
+            output += segments[index].outputDuration
+            guard segments.indices.contains(index + 1),
+                  segments[index + 1].sourceStart
+                    - (segments[index].sourceStart + segments[index].sourceDuration)
+                    > epsilon else { continue }
+            gapJunctions.append(output)
+        }
+        guard !gapJunctions.isEmpty else { return timeline }
+
+        let safeDefault = max(defaultTransitionDuration, 0)
+        var result = timeline
+        result.zoomClips.sort(by: zoomOrder)
+        for index in result.zoomClips.indices {
+            let clip = result.zoomClips[index]
+            let isBrokenJunction = gapJunctions.contains {
+                abs($0 - clip.endTime) <= ZoomInterpolator.adjacencyTolerance
+            }
+            let touchesNext = result.zoomClips.indices.contains(index + 1)
+                && abs(result.zoomClips[index + 1].startTime - clip.endTime)
+                    <= ZoomInterpolator.adjacencyTolerance
+            guard isBrokenJunction, !touchesNext,
+                  clip.exitDuration <= epsilon,
+                  clip.exitProgressOffset >= 1 - epsilon else { continue }
+            let available = result.zoomClips.indices.contains(index + 1)
+                ? max(result.zoomClips[index + 1].startTime - clip.endTime, 0)
+                : safeDefault
+            result.zoomClips[index].exitDuration = min(safeDefault, available)
+            result.zoomClips[index].exitProgressOffset = 0
+        }
+
+        result.screenMotionClips.sort(by: screenMotionOrder)
+        for index in result.screenMotionClips.indices {
+            let timing = result.screenMotionClips[index].timing
+            let isBrokenJunction = gapJunctions.contains {
+                abs($0 - timing.endTime) <= ZoomInterpolator.adjacencyTolerance
+            }
+            let touchesNext = result.screenMotionClips.indices.contains(index + 1)
+                && abs(
+                    result.screenMotionClips[index + 1].timing.startTime
+                        - timing.endTime
+                ) <= ZoomInterpolator.adjacencyTolerance
+            guard isBrokenJunction, !touchesNext,
+                  timing.returnDuration <= epsilon,
+                  timing.returnProgressOffset >= 1 - epsilon else { continue }
+            let available = result.screenMotionClips.indices.contains(index + 1)
+                ? max(
+                    result.screenMotionClips[index + 1].timing.startTime
+                        - timing.endTime,
+                    0
+                )
+                : safeDefault
+            result.screenMotionClips[index].timing.returnDuration = min(
+                safeDefault, available
+            )
+            result.screenMotionClips[index].timing.returnProgressOffset = 0
+        }
+
+        result.cameraMotionClips.sort(by: cameraMotionOrder)
+        for index in result.cameraMotionClips.indices {
+            let timing = result.cameraMotionClips[index].timing
+            let isBrokenJunction = gapJunctions.contains {
+                abs($0 - timing.endTime) <= ZoomInterpolator.adjacencyTolerance
+            }
+            let touchesNext = result.cameraMotionClips.indices.contains(index + 1)
+                && abs(
+                    result.cameraMotionClips[index + 1].timing.startTime
+                        - timing.endTime
+                ) <= ZoomInterpolator.adjacencyTolerance
+            guard isBrokenJunction, !touchesNext,
+                  timing.returnDuration <= epsilon,
+                  timing.returnProgressOffset >= 1 - epsilon else { continue }
+            let available = result.cameraMotionClips.indices.contains(index + 1)
+                ? max(
+                    result.cameraMotionClips[index + 1].timing.startTime
+                        - timing.endTime,
+                    0
+                )
+                : safeDefault
+            result.cameraMotionClips[index].timing.returnDuration = min(
+                safeDefault, available
+            )
+            result.cameraMotionClips[index].timing.returnProgressOffset = 0
+        }
+        return result
+    }
+
+    public static func splitPrimarySegment(
+        in timeline: ProjectTimeline,
+        atOutputTime outputTime: TimeInterval,
+        newRightSegmentID: UUID,
+        fullSourceDuration: TimeInterval
+    ) throws -> ProjectTimeline {
+        try validate(timeline, fullSourceDuration: fullSourceDuration)
+        let map = try TimelineMap(
+            sourceSequence: timeline.sourceSequence,
+            fullSourceDuration: fullSourceDuration
+        )
+        guard outputTime.isFinite,
+              let resolved = map.segment(atOutputTime: outputTime),
+              outputTime > resolved.outputStart + epsilon,
+              outputTime < resolved.outputEnd - epsilon else {
+            throw ProjectTimelineEditingError.splitOutsideSegment
+        }
+        guard !map.segments.contains(where: { $0.id == newRightSegmentID }) else {
+            throw ProjectTimelineEditingError.duplicateSegmentID(newRightSegmentID)
+        }
+
+        let splitOutputOffset = outputTime - resolved.outputStart
+        let splitSourceOffset = splitOutputOffset * resolved.playbackRate
+        var segments = map.segments.map(Self.authoredSegment)
+        guard let index = segments.firstIndex(where: { $0.id == resolved.id }) else {
+            throw ProjectTimelineEditingError.segmentNotFound(resolved.id)
+        }
+        segments[index].sourceDuration = splitSourceOffset
+        segments.insert(
+            RecordingSegment(
+                id: newRightSegmentID,
+                sourceStart: resolved.sourceStart + splitSourceOffset,
+                sourceDuration: resolved.sourceDuration - splitSourceOffset,
+                playbackRate: resolved.playbackRate
+            ),
+            at: index + 1
+        )
+
+        var result = timeline
+        result.sourceSequence = .edited(segments)
+        if let overrides = timeline.primarySegmentAudioOverrides[resolved.id] {
+            result.primarySegmentAudioOverrides[newRightSegmentID] = overrides
+        }
+        try validate(result, fullSourceDuration: fullSourceDuration)
+        return result
+    }
+
+    public static func trimPrimarySegment(
+        in timeline: ProjectTimeline,
+        segmentID: UUID,
+        edge: RecordingSegmentTrimEdge,
+        toOutputTime outputTime: TimeInterval,
+        fullSourceDuration: TimeInterval,
+        defaultTransitionDuration: TimeInterval = 0.7
+    ) throws -> ProjectTimeline {
+        try validate(timeline, fullSourceDuration: fullSourceDuration)
+        let map = try TimelineMap(
+            sourceSequence: timeline.sourceSequence,
+            fullSourceDuration: fullSourceDuration
+        )
+        guard let resolved = map.segments.first(where: { $0.id == segmentID }) else {
+            throw ProjectTimelineEditingError.segmentNotFound(segmentID)
+        }
+        guard outputTime.isFinite else {
+            throw ProjectTimelineEditingError.trimOutsideSegment(segmentID)
+        }
+
+        let deletion: OutputDeletion
+        var segments = map.segments.map(Self.authoredSegment)
+        guard let index = segments.firstIndex(where: { $0.id == segmentID }) else {
+            throw ProjectTimelineEditingError.segmentNotFound(segmentID)
+        }
+
+        switch edge {
+        case .left:
+            if abs(outputTime - resolved.outputStart) <= epsilon {
+                return timeline
+            }
+            if outputTime < resolved.outputStart - epsilon {
+                let previousSourceEnd = segments.enumerated()
+                    .filter {
+                        $0.offset != index
+                            && $0.element.sourceEnd <= resolved.sourceStart + epsilon
+                    }
+                    .map { $0.element.sourceEnd }
+                    .max() ?? 0
+                let available = max(resolved.sourceStart - previousSourceEnd, 0)
+                let outputAmount = resolved.outputStart - outputTime
+                let sourceAmount = outputAmount * resolved.playbackRate
+                guard sourceAmount <= available + epsilon else {
+                    throw ProjectTimelineEditingError.trimOutsideSegment(segmentID)
+                }
+                segments[index].sourceStart -= sourceAmount
+                segments[index].sourceDuration += sourceAmount
+                var result = timeline
+                result.sourceSequence = .edited(segments)
+                result.zoomClips = timeline.zoomClips.map {
+                    inserting($0, at: resolved.outputStart, duration: outputAmount)
+                }
+                result.screenMotionClips = timeline.screenMotionClips.map {
+                    inserting($0, at: resolved.outputStart, duration: outputAmount)
+                }
+                result.cameraMotionClips = timeline.cameraMotionClips.map {
+                    inserting($0, at: resolved.outputStart, duration: outputAmount)
+                }
+                result.mosaicClips = timeline.mosaicClips.map {
+                    inserting($0, at: resolved.outputStart, duration: outputAmount)
+                }
+                result.stickerClips = timeline.stickerClips.map {
+                    inserting($0, at: resolved.outputStart, duration: outputAmount)
+                }
+                sortZoom(&result.zoomClips)
+                sortScreenMotion(&result.screenMotionClips)
+                sortCameraMotion(&result.cameraMotionClips)
+                try validate(result, fullSourceDuration: fullSourceDuration)
+                return result
+            }
+            guard outputTime > resolved.outputStart + epsilon,
+                  outputTime < resolved.outputEnd - epsilon else {
+                throw ProjectTimelineEditingError.trimOutsideSegment(segmentID)
+            }
+            let sourceAmount = (outputTime - resolved.outputStart) * resolved.playbackRate
+            segments[index].sourceStart += sourceAmount
+            segments[index].sourceDuration -= sourceAmount
+            deletion = OutputDeletion(start: resolved.outputStart, end: outputTime)
+
+        case .right:
+            if abs(outputTime - resolved.outputEnd) <= epsilon {
+                return timeline
+            }
+            if outputTime > resolved.outputEnd + epsilon {
+                let availableDuration = fullSourceDuration
+                let nextSourceStart = segments.enumerated()
+                    .filter {
+                        $0.offset != index
+                            && $0.element.sourceStart >= resolved.sourceEnd - epsilon
+                    }
+                    .map { $0.element.sourceStart }
+                    .min() ?? availableDuration
+                let available = max(nextSourceStart - resolved.sourceEnd, 0)
+                let outputAmount = outputTime - resolved.outputEnd
+                let sourceAmount = outputAmount * resolved.playbackRate
+                guard sourceAmount <= available + epsilon else {
+                    throw ProjectTimelineEditingError.trimOutsideSegment(segmentID)
+                }
+                segments[index].sourceDuration += sourceAmount
+                var result = timeline
+                result.sourceSequence = .edited(segments)
+                result.zoomClips = timeline.zoomClips.map {
+                    inserting($0, at: resolved.outputEnd, duration: outputAmount)
+                }
+                result.screenMotionClips = timeline.screenMotionClips.map {
+                    inserting($0, at: resolved.outputEnd, duration: outputAmount)
+                }
+                result.cameraMotionClips = timeline.cameraMotionClips.map {
+                    inserting($0, at: resolved.outputEnd, duration: outputAmount)
+                }
+                result.mosaicClips = timeline.mosaicClips.map {
+                    inserting($0, at: resolved.outputEnd, duration: outputAmount)
+                }
+                result.stickerClips = timeline.stickerClips.map {
+                    inserting($0, at: resolved.outputEnd, duration: outputAmount)
+                }
+                sortZoom(&result.zoomClips)
+                sortScreenMotion(&result.screenMotionClips)
+                sortCameraMotion(&result.cameraMotionClips)
+                try validate(result, fullSourceDuration: fullSourceDuration)
+                return result
+            }
+            guard outputTime > resolved.outputStart + epsilon,
+                  outputTime < resolved.outputEnd - epsilon else {
+                throw ProjectTimelineEditingError.trimOutsideSegment(segmentID)
+            }
+            segments[index].sourceDuration =
+                (outputTime - resolved.outputStart) * resolved.playbackRate
+            deletion = OutputDeletion(start: outputTime, end: resolved.outputEnd)
+        }
+
+        return try ripple(
+            timeline,
+            replacingSourceSequenceWith: .edited(segments),
+            deleting: deletion,
+            deletesOutputTail: deletion.end >= map.outputDuration - epsilon,
+            fullSourceDuration: fullSourceDuration,
+            defaultTransitionDuration: defaultTransitionDuration
+        )
+    }
+
+    public static func removePrimarySegment(
+        from timeline: ProjectTimeline,
+        segmentID: UUID,
+        fullSourceDuration: TimeInterval,
+        defaultTransitionDuration: TimeInterval = 0.7
+    ) throws -> ProjectTimeline {
+        try validate(timeline, fullSourceDuration: fullSourceDuration)
+        let map = try TimelineMap(
+            sourceSequence: timeline.sourceSequence,
+            fullSourceDuration: fullSourceDuration
+        )
+        guard let removed = map.segments.first(where: { $0.id == segmentID }) else {
+            throw ProjectTimelineEditingError.segmentNotFound(segmentID)
+        }
+        guard map.segments.count > 1 else {
+            throw ProjectTimelineEditingError.cannotRemoveFinalSegment
+        }
+        let retained = map.segments
+            .filter { $0.id != segmentID }
+            .map(Self.authoredSegment)
+        return try ripple(
+            timeline,
+            replacingSourceSequenceWith: .edited(retained),
+            deleting: OutputDeletion(start: removed.outputStart, end: removed.outputEnd),
+            deletesOutputTail: removed.outputEnd >= map.outputDuration - epsilon,
+            fullSourceDuration: fullSourceDuration,
+            defaultTransitionDuration: defaultTransitionDuration
+        )
+    }
+
+    /// Moves one retained source segment to a new output-order index. Media,
+    /// audio, camera and pointer tracks follow through TimelineMap; authored
+    /// visual tracks are translated with the segment that owns their start.
+    public static func movePrimarySegment(
+        in timeline: ProjectTimeline,
+        segmentID: UUID,
+        toIndex requestedIndex: Int,
+        fullSourceDuration: TimeInterval
+    ) throws -> ProjectTimeline {
+        try validate(timeline, fullSourceDuration: fullSourceDuration)
+        let oldMap = try TimelineMap(
+            sourceSequence: timeline.sourceSequence,
+            fullSourceDuration: fullSourceDuration
+        )
+        guard let oldIndex = oldMap.segments.firstIndex(where: { $0.id == segmentID }) else {
+            throw ProjectTimelineEditingError.segmentNotFound(segmentID)
+        }
+        let finalIndex = min(max(requestedIndex, 0), oldMap.segments.count - 1)
+        guard finalIndex != oldIndex else { return timeline }
+
+        var segments = oldMap.segments.map(Self.authoredSegment)
+        let moved = segments.remove(at: oldIndex)
+        segments.insert(moved, at: finalIndex)
+        let newMap = try TimelineMap(
+            sourceSequence: .edited(segments),
+            fullSourceDuration: fullSourceDuration
+        )
+        let newStarts = Dictionary(uniqueKeysWithValues: newMap.segments.map {
+            ($0.id, $0.outputStart)
+        })
+
+        var result = timeline
+        result.sourceSequence = .edited(segments)
+        result.zoomClips = remappedZoomClips(
+            timeline.zoomClips,
+            oldMap: oldMap,
+            newStarts: newStarts,
+            outputDuration: newMap.outputDuration
+        )
+        result.screenMotionClips = remappedScreenMotionClips(
+            timeline.screenMotionClips,
+            oldMap: oldMap,
+            newStarts: newStarts,
+            outputDuration: newMap.outputDuration
+        )
+        result.cameraMotionClips = remappedCameraMotionClips(
+            timeline.cameraMotionClips,
+            oldMap: oldMap,
+            newStarts: newStarts,
+            outputDuration: newMap.outputDuration
+        )
+        result.mosaicClips = remappedMosaicClips(
+            timeline.mosaicClips,
+            oldMap: oldMap,
+            newStarts: newStarts,
+            outputDuration: newMap.outputDuration
+        )
+        result.stickerClips = remappedStickerClips(
+            timeline.stickerClips,
+            oldMap: oldMap,
+            newStarts: newStarts,
+            outputDuration: newMap.outputDuration
+        )
+        try validate(result, fullSourceDuration: fullSourceDuration)
+        return result
+    }
+
+    /// CUT-001: restore one deleted source interval without collapsing or
+    /// replacing any other authored cut. All media tracks inherit this source
+    /// sequence; existing timed effects at/after the junction are moved through
+    /// the inverse ripple so they keep their output-relative placement.
+    public static func restorePrimaryGap(
+        in timeline: ProjectTimeline,
+        previousSegmentID: UUID,
+        nextSegmentID: UUID,
+        restoredSegmentID: UUID,
+        fullSourceDuration: TimeInterval
+    ) throws -> ProjectTimeline {
+        try validate(timeline, fullSourceDuration: fullSourceDuration)
+        let map = try TimelineMap(
+            sourceSequence: timeline.sourceSequence,
+            fullSourceDuration: fullSourceDuration
+        )
+        guard !map.segments.contains(where: { $0.id == restoredSegmentID }) else {
+            throw ProjectTimelineEditingError.duplicateSegmentID(restoredSegmentID)
+        }
+        guard let previousIndex = map.segments.firstIndex(where: {
+            $0.id == previousSegmentID
+        }),
+        map.segments.indices.contains(previousIndex + 1),
+        map.segments[previousIndex + 1].id == nextSegmentID else {
+            throw ProjectTimelineEditingError.restoreJunctionNotFound(
+                previous: previousSegmentID,
+                next: nextSegmentID
+            )
+        }
+        let previous = map.segments[previousIndex]
+        let next = map.segments[previousIndex + 1]
+        let restoredDuration = next.sourceStart - previous.sourceEnd
+        guard restoredDuration > epsilon else {
+            throw ProjectTimelineEditingError.noRestorableSourceGap(
+                previous: previousSegmentID,
+                next: nextSegmentID
+            )
+        }
+
+        var segments = map.segments.map(Self.authoredSegment)
+        segments.insert(
+            RecordingSegment(
+                id: restoredSegmentID,
+                sourceStart: previous.sourceEnd,
+                sourceDuration: restoredDuration
+            ),
+            at: previousIndex + 1
+        )
+        let insertionTime = previous.outputEnd
+        var result = timeline
+        result.sourceSequence = .edited(segments)
+        result.primarySegmentAudioOverrides[restoredSegmentID] =
+            timeline.primarySegmentAudioOverrides[previousSegmentID]
+        result.zoomClips = timeline.zoomClips.map {
+            inserting($0, at: insertionTime, duration: restoredDuration)
+        }
+        result.screenMotionClips = timeline.screenMotionClips.map {
+            inserting($0, at: insertionTime, duration: restoredDuration)
+        }
+        result.cameraMotionClips = timeline.cameraMotionClips.map {
+            inserting($0, at: insertionTime, duration: restoredDuration)
+        }
+        result.mosaicClips = timeline.mosaicClips.map {
+            inserting($0, at: insertionTime, duration: restoredDuration)
+        }
+        result.stickerClips = timeline.stickerClips.map {
+            inserting($0, at: insertionTime, duration: restoredDuration)
+        }
+        sortZoom(&result.zoomClips)
+        sortScreenMotion(&result.screenMotionClips)
+        sortCameraMotion(&result.cameraMotionClips)
+        try validate(result, fullSourceDuration: fullSourceDuration)
+        return result
+    }
+
+    /// Restores source material removed before the first retained segment.
+    /// The former UI only described junctions between two clips, making an
+    /// opening trim impossible to undo from the timeline.
+    public static func restorePrimaryLeadingGap(
+        in timeline: ProjectTimeline,
+        restoredSegmentID: UUID,
+        fullSourceDuration: TimeInterval
+    ) throws -> ProjectTimeline {
+        try validate(timeline, fullSourceDuration: fullSourceDuration)
+        let map = try TimelineMap(
+            sourceSequence: timeline.sourceSequence,
+            fullSourceDuration: fullSourceDuration
+        )
+        guard let first = map.segments.first,
+              first.sourceStart > epsilon else {
+            throw ProjectTimelineEditingError.noRestorableLeadingSourceGap(
+                map.segments.first?.id ?? restoredSegmentID
+            )
+        }
+        guard !map.segments.contains(where: { $0.id == restoredSegmentID }) else {
+            throw ProjectTimelineEditingError.duplicateSegmentID(restoredSegmentID)
+        }
+        let restoredDuration = first.sourceStart
+        var segments = map.segments.map(Self.authoredSegment)
+        segments.insert(
+            RecordingSegment(
+                id: restoredSegmentID,
+                sourceStart: 0,
+                sourceDuration: restoredDuration
+            ),
+            at: 0
+        )
+        var result = timeline
+        result.sourceSequence = .edited(segments)
+        result.primarySegmentAudioOverrides[restoredSegmentID] =
+            timeline.primarySegmentAudioOverrides[first.id]
+        result.zoomClips = timeline.zoomClips.map {
+            inserting($0, at: 0, duration: restoredDuration)
+        }
+        result.screenMotionClips = timeline.screenMotionClips.map {
+            inserting($0, at: 0, duration: restoredDuration)
+        }
+        result.cameraMotionClips = timeline.cameraMotionClips.map {
+            inserting($0, at: 0, duration: restoredDuration)
+        }
+        result.mosaicClips = timeline.mosaicClips.map {
+            inserting($0, at: 0, duration: restoredDuration)
+        }
+        result.stickerClips = timeline.stickerClips.map {
+            inserting($0, at: 0, duration: restoredDuration)
+        }
+        sortZoom(&result.zoomClips)
+        sortScreenMotion(&result.screenMotionClips)
+        sortCameraMotion(&result.cameraMotionClips)
+        try validate(result, fullSourceDuration: fullSourceDuration)
+        return result
+    }
+
+    /// Restores source material removed after the final retained segment.
+    /// This is the right-edge counterpart of `restorePrimaryLeadingGap`:
+    /// earlier cuts and every existing timed effect remain unchanged because
+    /// the insertion happens strictly after the current output duration.
+    public static func restorePrimaryTrailingGap(
+        in timeline: ProjectTimeline,
+        restoredSegmentID: UUID,
+        fullSourceDuration: TimeInterval
+    ) throws -> ProjectTimeline {
+        try validate(timeline, fullSourceDuration: fullSourceDuration)
+        let map = try TimelineMap(
+            sourceSequence: timeline.sourceSequence,
+            fullSourceDuration: fullSourceDuration
+        )
+        guard let last = map.segments.last else {
+            throw ProjectTimelineEditingError.noRestorableTrailingSourceGap(
+                restoredSegmentID
+            )
+        }
+        let sourceAvailableDuration = fullSourceDuration
+        guard sourceAvailableDuration - last.sourceEnd > epsilon else {
+            throw ProjectTimelineEditingError.noRestorableTrailingSourceGap(
+                map.segments.last?.id ?? restoredSegmentID
+            )
+        }
+        guard !map.segments.contains(where: { $0.id == restoredSegmentID }) else {
+            throw ProjectTimelineEditingError.duplicateSegmentID(restoredSegmentID)
+        }
+        var segments = map.segments.map(Self.authoredSegment)
+        segments.append(
+            RecordingSegment(
+                id: restoredSegmentID,
+                sourceStart: last.sourceEnd,
+                sourceDuration: sourceAvailableDuration - last.sourceEnd
+            )
+        )
+        var result = timeline
+        result.sourceSequence = .edited(segments)
+        result.primarySegmentAudioOverrides[restoredSegmentID] =
+            timeline.primarySegmentAudioOverrides[last.id]
+        try validate(result, fullSourceDuration: fullSourceDuration)
+        return result
+    }
+
+    /// CUT-002: remove a structural split between two source-contiguous
+    /// segments. Output time and every timed effect stay unchanged because no
+    /// media interval is inserted or removed.
+    public static func mergeAdjacentPrimarySegments(
+        in timeline: ProjectTimeline,
+        previousSegmentID: UUID,
+        nextSegmentID: UUID,
+        fullSourceDuration: TimeInterval
+    ) throws -> ProjectTimeline {
+        try validate(timeline, fullSourceDuration: fullSourceDuration)
+        let map = try TimelineMap(
+            sourceSequence: timeline.sourceSequence,
+            fullSourceDuration: fullSourceDuration
+        )
+        guard let previousIndex = map.segments.firstIndex(where: {
+            $0.id == previousSegmentID
+        }),
+        map.segments.indices.contains(previousIndex + 1),
+        map.segments[previousIndex + 1].id == nextSegmentID else {
+            throw ProjectTimelineEditingError.restoreJunctionNotFound(
+                previous: previousSegmentID,
+                next: nextSegmentID
+            )
+        }
+        let previous = map.segments[previousIndex]
+        let next = map.segments[previousIndex + 1]
+        guard abs(next.sourceStart - previous.sourceEnd) <= epsilon else {
+            throw ProjectTimelineEditingError.cannotMergeDeletedGap(
+                previous: previousSegmentID,
+                next: nextSegmentID
+            )
+        }
+        guard abs(next.playbackRate - previous.playbackRate) <= epsilon else {
+            throw ProjectTimelineEditingError.cannotMergeDifferentPlaybackRates(
+                previous: previousSegmentID,
+                next: nextSegmentID
+            )
+        }
+        guard primarySegmentAudioOverrides(
+            in: timeline,
+            segmentID: previousSegmentID
+        ) == primarySegmentAudioOverrides(
+            in: timeline,
+            segmentID: nextSegmentID
+        ) else {
+            throw ProjectTimelineEditingError.cannotMergeDifferentAudioOverrides(
+                previous: previousSegmentID,
+                next: nextSegmentID
+            )
+        }
+
+        var segments = map.segments.map(Self.authoredSegment)
+        segments[previousIndex].sourceDuration = next.sourceEnd - previous.sourceStart
+        segments.remove(at: previousIndex + 1)
+        var result = timeline
+        result.sourceSequence = .edited(segments)
+        result.primarySegmentAudioOverrides.removeValue(forKey: nextSegmentID)
+        try validate(result, fullSourceDuration: fullSourceDuration)
+        return result
+    }
+
+    public static func insertingScreenMotion(
+        _ clip: ScreenMotionClip,
+        in timeline: ProjectTimeline
+    ) throws -> ProjectTimeline {
+        guard !timeline.screenMotionClips.contains(where: { $0.id == clip.id }) else {
+            throw ProjectTimelineEditingError.duplicateClipID(track: .screenMotion, id: clip.id)
+        }
+        var result = timeline
+        result.screenMotionClips.append(clip)
+        sortScreenMotion(&result.screenMotionClips)
+        try validate(result)
+        return result
+    }
+
+    public static func removingScreenMotion(
+        id: UUID,
+        from timeline: ProjectTimeline,
+        defaultReturn: TimeInterval = 0.7
+    ) throws -> ProjectTimeline {
+        let ordered = timeline.screenMotionClips.sorted(by: screenMotionOrder)
+        guard let removedIndex = ordered.firstIndex(where: { $0.id == id }) else {
+            throw ProjectTimelineEditingError.missingClip(track: .screenMotion, id: id)
+        }
+        let predecessorID = removedIndex > 0 ? ordered[removedIndex - 1].id : nil
+        var result = timeline
+        result.screenMotionClips.removeAll { $0.id == id }
+        sortScreenMotion(&result.screenMotionClips)
+        // A removed successor frees room for the originally authored return.
+        if let predecessorID,
+           let index = result.screenMotionClips.firstIndex(where: { $0.id == predecessorID }) {
+            let original = result.screenMotionClips[index].timing
+            var timing = original
+            timing.preserveTransitionIntent(defaultTransition: defaultReturn)
+            let requested = timing.requestedReturnDuration(defaultTransition: defaultReturn)
+            let available = result.screenMotionClips.indices.contains(index + 1)
+                ? result.screenMotionClips[index + 1].timing.startTime - timing.endTime
+                : requested
+            if available > ZoomInterpolator.adjacencyTolerance {
+                timing.returnDuration = min(requested, max(available, 0))
+                if timing.returnDuration > original.returnDuration + 0.000_001 {
+                    timing.returnProgressOffset = 0
+                }
+                result.screenMotionClips[index].timing = timing
+            }
+        }
+        try validate(result)
+        return result
+    }
+
+    public static func replacingScreenMotion(
+        id: UUID,
+        in timeline: ProjectTimeline,
+        with clip: ScreenMotionClip
+    ) throws -> ProjectTimeline {
+        guard id == clip.id else {
+            throw ProjectTimelineEditingError.mismatchedClipID(
+                track: .screenMotion,
+                expected: id,
+                actual: clip.id
+            )
+        }
+        guard let index = timeline.screenMotionClips.firstIndex(where: { $0.id == id }) else {
+            throw ProjectTimelineEditingError.missingClip(track: .screenMotion, id: id)
+        }
+        var result = timeline
+        result.screenMotionClips[index] = clip
+        sortScreenMotion(&result.screenMotionClips)
+        try validate(result)
+        return result
+    }
+
+    public static func insertingCameraMotion(
+        _ clip: CameraMotionClip,
+        in timeline: ProjectTimeline
+    ) throws -> ProjectTimeline {
+        guard !timeline.cameraMotionClips.contains(where: { $0.id == clip.id }) else {
+            throw ProjectTimelineEditingError.duplicateClipID(track: .cameraMotion, id: clip.id)
+        }
+        var result = timeline
+        result.cameraMotionClips.append(clip)
+        sortCameraMotion(&result.cameraMotionClips)
+        try validate(result)
+        return result
+    }
+
+    public static func removingCameraMotion(
+        id: UUID,
+        from timeline: ProjectTimeline,
+        defaultReturn: TimeInterval = 0.7
+    ) throws -> ProjectTimeline {
+        let ordered = timeline.cameraMotionClips.sorted(by: cameraMotionOrder)
+        guard let removedIndex = ordered.firstIndex(where: { $0.id == id }) else {
+            throw ProjectTimelineEditingError.missingClip(track: .cameraMotion, id: id)
+        }
+        let predecessorID = removedIndex > 0 ? ordered[removedIndex - 1].id : nil
+        var result = timeline
+        result.cameraMotionClips.removeAll { $0.id == id }
+        sortCameraMotion(&result.cameraMotionClips)
+        // A removed successor frees room for the originally authored return.
+        if let predecessorID,
+           let index = result.cameraMotionClips.firstIndex(where: { $0.id == predecessorID }) {
+            let original = result.cameraMotionClips[index].timing
+            var timing = original
+            timing.preserveTransitionIntent(defaultTransition: defaultReturn)
+            let requested = timing.requestedReturnDuration(defaultTransition: defaultReturn)
+            let available = result.cameraMotionClips.indices.contains(index + 1)
+                ? result.cameraMotionClips[index + 1].timing.startTime - timing.endTime
+                : requested
+            if available > ZoomInterpolator.adjacencyTolerance {
+                timing.returnDuration = min(requested, max(available, 0))
+                if timing.returnDuration > original.returnDuration + 0.000_001 {
+                    timing.returnProgressOffset = 0
+                }
+                result.cameraMotionClips[index].timing = timing
+            }
+        }
+        try validate(result)
+        return result
+    }
+
+    public static func replacingCameraMotion(
+        id: UUID,
+        in timeline: ProjectTimeline,
+        with clip: CameraMotionClip
+    ) throws -> ProjectTimeline {
+        guard id == clip.id else {
+            throw ProjectTimelineEditingError.mismatchedClipID(
+                track: .cameraMotion,
+                expected: id,
+                actual: clip.id
+            )
+        }
+        guard let index = timeline.cameraMotionClips.firstIndex(where: { $0.id == id }) else {
+            throw ProjectTimelineEditingError.missingClip(track: .cameraMotion, id: id)
+        }
+        var result = timeline
+        result.cameraMotionClips[index] = clip
+        sortCameraMotion(&result.cameraMotionClips)
+        try validate(result)
+        return result
+    }
+
+    /// Structural validation used by the reducer when the source asset duration
+    /// is not available. Edit operations additionally validate against the real
+    /// duration through `TimelineMap` before returning.
+    public static func validate(_ timeline: ProjectTimeline) throws {
+        try validateSourceSequence(timeline.sourceSequence)
+        try validatePrimarySegmentAudioOverrides(
+            timeline.primarySegmentAudioOverrides,
+            sourceSequence: timeline.sourceSequence
+        )
+        try validateZoomClips(timeline.zoomClips)
+        try validateScreenMotionClips(timeline.screenMotionClips)
+        try validateCameraMotionClips(timeline.cameraMotionClips)
+        try validateMosaicClips(timeline.mosaicClips)
+        try validateStickerClips(timeline.stickerClips)
+    }
+
+    public static func validate(
+        _ timeline: ProjectTimeline,
+        fullSourceDuration: TimeInterval
+    ) throws {
+        _ = try TimelineMap(
+            sourceSequence: timeline.sourceSequence,
+            fullSourceDuration: fullSourceDuration
+        )
+        try validate(timeline)
+    }
+}

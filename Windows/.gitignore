@@ -1,0 +1,8 @@
+bin/
+tools/
+recordings/
+share/
+exports/
+publish/
+*.dogscwin
+*.dogscwin.tmp

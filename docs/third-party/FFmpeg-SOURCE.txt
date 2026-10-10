@@ -1,0 +1,21 @@
+FFmpeg / ffprobe in the Windows release are unmodified Gyan Windows x64 binaries.
+Version: 9.0.2-essentials_build-www.gyan.dev
+License: GPL v3, retained in FFmpeg-LICENSE.txt.
+
+Original build and binary distribution:
+https://github.com/GyanD/codexffmpeg/releases/tag/9.0.2
+https://www.gyan.dev/ffmpeg/builds/
+
+FFmpeg main-project source revision:
+https://github.com/FFmpeg/FFmpeg/commit/946fcce07b
+Source archive:
+https://github.com/FFmpeg/FFmpeg/archive/946fcce07b.tar.gz
+An unchanged source snapshot is also attached to this project's Windows Release:
+https://github.com/adrian147258/DOGsc-for-Windows/releases/tag/v0.1.0-windows-beta.1
+
+This snapshot contains the FFmpeg main project, not all external library sources.
+External library versions and build configuration are retained in FFmpeg-README.txt.
+Source and license information for the included components:
+https://github.com/adrian147258/DOGsc-for-Windows/blob/main/THIRD_PARTY_NOTICES.md
+
+The MIT license for DOGsc Windows does not replace the FFmpeg or font licenses.
