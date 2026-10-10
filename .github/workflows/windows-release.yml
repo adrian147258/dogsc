@@ -1,0 +1,103 @@
+name: Build Windows release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Windows beta release tag
+        required: true
+        default: v0.1.0-windows-beta.2
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: windows-release-${{ inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: windows-2025
+    timeout-minutes: 20
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      RELEASE_TAG: ${{ inputs.tag }}
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Validate release and download dependencies
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($env:RELEASE_TAG -notmatch '^v[0-9.]+-windows-beta\.[0-9]+$') { throw 'Invalid Windows beta tag.' }
+          $notes = ".github/release-notes/$env:RELEASE_TAG.md"
+          if (-not (Test-Path -LiteralPath $notes)) { throw 'Release notes are missing.' }
+          $release = gh api "repos/$env:GH_REPO/releases/tags/$env:RELEASE_TAG" | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0) {
+            gh release create $env:RELEASE_TAG --draft --prerelease --target $env:GITHUB_SHA --title "dogsc $env:RELEASE_TAG" --notes-file $notes
+            if ($LASTEXITCODE -ne 0) { throw 'Could not create draft release.' }
+          } elseif (-not $release.draft) { throw 'Refusing to replace a public release.' }
+          & powershell -NoProfile -ExecutionPolicy Bypass -File Windows/setup-tools.ps1
+          if ($LASTEXITCODE -ne 0) { throw 'Dependency setup failed.' }
+      - name: Build and verify startup
+        run: |
+          $ErrorActionPreference = 'Stop'
+          & powershell -NoProfile -ExecutionPolicy Bypass -File Windows/build.ps1
+          if ($LASTEXITCODE -ne 0) { throw 'Windows build failed.' }
+          $app = Start-Process -FilePath (Join-Path $PWD 'Windows/bin/DogSC.Windows.exe') -ArgumentList '--snapshot' -WindowStyle Hidden -PassThru
+          if (-not $app.WaitForExit(30000)) { Stop-Process -Id $app.Id; throw 'Startup check timed out.' }
+          if ($app.ExitCode -ne 0 -or -not (Test-Path 'Windows/bin/editor-preview.png')) { throw 'Startup check failed.' }
+      - name: Package, upload and verify draft assets
+        run: |
+          $ErrorActionPreference = 'Stop'
+          & powershell -NoProfile -ExecutionPolicy Bypass -File Windows/package.ps1
+          if ($LASTEXITCODE -ne 0) { throw 'Packaging failed.' }
+          $folder = (Get-Content Windows/share/latest-package-path.txt -Raw).Trim()
+          $outputFolder = Join-Path $PWD 'release-assets'
+          New-Item -ItemType Directory -Path $outputFolder | Out-Null
+          $zipName = "dogsc-$env:RELEASE_TAG-win-x64.zip"
+          Copy-Item -LiteralPath "$folder.zip" -Destination (Join-Path $outputFolder $zipName)
+          $sourceName = 'FFmpeg-946fcce07b-source.tar.gz'
+          $sourceFile = Join-Path $outputFolder $sourceName
+          Invoke-WebRequest -Uri "https://github.com/adrian147258/dogsc/releases/download/v0.1.0-windows-beta.1/$sourceName" -OutFile $sourceFile
+          if ((Get-FileHash $sourceFile).Hash.ToLowerInvariant() -ne '86f82e82456005881d1b97e9ce02f8a40bf2d181c8c958f8ae736886fdba2a34') { throw 'FFmpeg source checksum mismatch.' }
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $archive = [IO.Compression.ZipFile]::OpenRead((Join-Path $outputFolder $zipName))
+          try {
+            $paths = @($archive.Entries | ForEach-Object { $_.FullName.Replace('\', '/') })
+            if ($paths | Where-Object { $_ -match '\.(mp4|dogscwin)$|memo\.json|last-error|test-results' }) { throw 'Unexpected package data.' }
+            foreach ($asset in @('Windows/bin/DogSC.Windows.exe', 'Windows/Editor.xaml', 'Windows/EditorTheme.xaml', 'Windows/tools/ffmpeg.exe', 'Windows/tools/ffprobe.exe', 'LICENSE', 'THIRD_PARTY_NOTICES.md', 'Resources/Onboarding/SoftLight.png')) {
+              if (-not ($paths | Where-Object { $_.EndsWith('/' + $asset) })) { throw "Missing runtime asset: $asset" }
+            }
+          } finally { $archive.Dispose() }
+          $assetNames = @($zipName, $sourceName)
+          $lines = foreach ($name in $assetNames) { (Get-FileHash (Join-Path $outputFolder $name)).Hash.ToLowerInvariant() + '  ' + $name }
+          [IO.File]::WriteAllText((Join-Path $outputFolder 'SHA256SUMS.txt'), ($lines -join "`n") + "`n", [Text.UTF8Encoding]::new($false))
+          $assetNames += 'SHA256SUMS.txt'
+          foreach ($name in $assetNames) {
+            gh release upload $env:RELEASE_TAG (Join-Path $outputFolder $name) --clobber
+            if ($LASTEXITCODE -ne 0) { throw "Upload failed: $name" }
+          }
+          $release = gh api "repos/$env:GH_REPO/releases/tags/$env:RELEASE_TAG" | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0 -or -not $release.draft) { throw 'Draft release validation failed.' }
+          foreach ($name in $assetNames) {
+            $file = Get-Item (Join-Path $outputFolder $name)
+            $asset = $release.assets | Where-Object { $_.name -eq $name } | Select-Object -First 1
+            $digest = 'sha256:' + (Get-FileHash $file.FullName).Hash.ToLowerInvariant()
+            if (-not $asset -or $asset.state -ne 'uploaded' -or $asset.size -ne $file.Length -or $asset.digest -ne $digest) { throw "Uploaded asset verification failed: $name" }
+          }
+      - name: Publish verified beta
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $release = gh api "repos/$env:GH_REPO/releases/tags/$env:RELEASE_TAG" | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0 -or -not $release.draft) { throw 'Release is not a draft.' }
+          $body = [IO.File]::ReadAllText((Join-Path $PWD ".github/release-notes/$env:RELEASE_TAG.md"))
+          $payload = @{ draft = $false; prerelease = $true; target_commitish = $env:GITHUB_SHA; body = $body; make_latest = 'false' } | ConvertTo-Json
+          [IO.File]::WriteAllText((Join-Path $PWD 'publish-release.json'), $payload, [Text.UTF8Encoding]::new($false))
+          gh api --method PATCH "repos/$env:GH_REPO/releases/$($release.id)" --input publish-release.json
+          if ($LASTEXITCODE -ne 0) { throw 'Publishing failed.' }
