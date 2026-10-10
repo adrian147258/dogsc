@@ -2,17 +2,17 @@
 >
 > 原作和本项目源码均采用 MIT，保留原作者版权声明。本项目不代表原作者的官方 Windows 发行版。
 
-# DOGsc for Windows
+# dogsc
 
 面向 Windows 的录屏与轻量编辑工具：录制屏幕、整理时间线，让鼠标跟随、自动缩放和背景设计一起参与成片。
 
-**[下载 Windows 体验版](https://github.com/adrian147258/DOGsc-for-Windows/releases/tag/v0.1.0-windows-beta.1)** · [全部 Releases](https://github.com/adrian147258/DOGsc-for-Windows/releases) · [反馈问题](https://github.com/adrian147258/DOGsc-for-Windows/issues) · [DogSC 原作](https://github.com/laogou717/dogsc)
+**[下载 Windows 体验版](https://github.com/adrian147258/dogsc/releases/tag/v0.1.0-windows-beta.1)** · [全部 Releases](https://github.com/adrian147258/dogsc/releases) · [反馈问题](https://github.com/adrian147258/dogsc/issues) · [DogSC 原作](https://github.com/laogou717/dogsc)
 
 ![Windows 编辑器：中央预览、右侧布局设置和时间线](docs/windows/editor.png)
 
 ## 下载与启动
 
-1. 打开 [Release 下载页](https://github.com/adrian147258/DOGsc-for-Windows/releases/tag/v0.1.0-windows-beta.1)，下载名称带 **`win-x64.zip`** 的体验包。
+1. 打开 [Release 下载页](https://github.com/adrian147258/dogsc/releases/tag/v0.1.0-windows-beta.1)，下载名称带 **`win-x64.zip`** 的体验包。
 2. **完整解压**到一个可写文件夹，例如桌面。不要直接在压缩包里运行。
 3. 双击 `Windows/bin/DogSC.Windows.exe`；也可双击 `Start-DogSC.cmd`。
 4. 保留整个文件夹结构。EXE 依赖随附的 XAML、字体和录屏工具，不能单独拿出来使用。
@@ -93,8 +93,8 @@ Windows 项目仍引用原始视频及自定义背景图片，移动项目时要
 需要 Windows x64 与 .NET Framework 4.8。WPF 和 C# 编译器使用系统 .NET Framework；无需安装 Node.js 或 Xcode。
 
 ```powershell
-git clone https://github.com/adrian147258/DOGsc-for-Windows.git
-cd DOGsc-for-Windows
+git clone https://github.com/adrian147258/dogsc.git
+cd dogsc
 
 # 下载并校验第三方录屏组件
 powershell -NoProfile -ExecutionPolicy Bypass -File .\Windows\setup-tools.ps1

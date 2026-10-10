@@ -11,11 +11,11 @@ https://github.com/FFmpeg/FFmpeg/commit/946fcce07b
 Source archive:
 https://github.com/FFmpeg/FFmpeg/archive/946fcce07b.tar.gz
 An unchanged source snapshot is also attached to this project's Windows Release:
-https://github.com/adrian147258/DOGsc-for-Windows/releases/tag/v0.1.0-windows-beta.1
+https://github.com/adrian147258/dogsc/releases/tag/v0.1.0-windows-beta.1
 
 This snapshot contains the FFmpeg main project, not all external library sources.
 External library versions and build configuration are retained in FFmpeg-README.txt.
 Source and license information for the included components:
-https://github.com/adrian147258/DOGsc-for-Windows/blob/main/THIRD_PARTY_NOTICES.md
+https://github.com/adrian147258/dogsc/blob/main/THIRD_PARTY_NOTICES.md
 
 The MIT license for DOGsc Windows does not replace the FFmpeg or font licenses.

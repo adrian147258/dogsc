@@ -2,7 +2,7 @@ DogSC Windows 体验版 · 录制保存修复与原版风格面板
 
 这是根据神烦老狗的 DogSC 二次创作的非官方 Windows 版本，当前还不完善。
 原作：https://github.com/laogou717/dogsc
-Windows 源码：https://github.com/adrian147258/DOGsc-for-Windows
+Windows 源码：https://github.com/adrian147258/dogsc
 原作与改编源码采用 MIT，保留原作者版权；FFmpeg 和字体遵循各自许可。
 
 使用方法
