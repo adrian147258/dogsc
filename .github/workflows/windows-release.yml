@@ -37,12 +37,15 @@ jobs:
           if ($env:RELEASE_TAG -notmatch '^v[0-9.]+-windows-beta\.[0-9]+$') { throw 'Invalid Windows beta tag.' }
           $notes = ".github/release-notes/$env:RELEASE_TAG.md"
           if (-not (Test-Path -LiteralPath $notes)) { throw 'Release notes are missing.' }
-          $release = gh api "repos/$env:GH_REPO/releases/tags/$env:RELEASE_TAG" | ConvertFrom-Json
-          if ($LASTEXITCODE -ne 0) {
+          $releases = gh api "repos/$env:GH_REPO/releases?per_page=100" | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0) { throw 'Could not inspect repository releases.' }
+          $release = $releases | Where-Object { $_.tag_name -eq $env:RELEASE_TAG } | Select-Object -First 1
+          if (-not $release) {
             gh release create $env:RELEASE_TAG --draft --prerelease --target $env:GITHUB_SHA --title "dogsc $env:RELEASE_TAG" --notes-file $notes
             if ($LASTEXITCODE -ne 0) { throw 'Could not create draft release.' }
           } elseif (-not $release.draft) { throw 'Refusing to replace a public release.' }
-          & powershell -NoProfile -ExecutionPolicy Bypass -File Windows/setup-tools.ps1
+          $ProgressPreference = 'SilentlyContinue'
+          & ./Windows/setup-tools.ps1
           if ($LASTEXITCODE -ne 0) { throw 'Dependency setup failed.' }
       - name: Build and verify startup
         run: |
@@ -83,7 +86,8 @@ jobs:
             gh release upload $env:RELEASE_TAG (Join-Path $outputFolder $name) --clobber
             if ($LASTEXITCODE -ne 0) { throw "Upload failed: $name" }
           }
-          $release = gh api "repos/$env:GH_REPO/releases/tags/$env:RELEASE_TAG" | ConvertFrom-Json
+          $releases = gh api "repos/$env:GH_REPO/releases?per_page=100" | ConvertFrom-Json
+          $release = $releases | Where-Object { $_.tag_name -eq $env:RELEASE_TAG } | Select-Object -First 1
           if ($LASTEXITCODE -ne 0 -or -not $release.draft) { throw 'Draft release validation failed.' }
           foreach ($name in $assetNames) {
             $file = Get-Item (Join-Path $outputFolder $name)
@@ -94,7 +98,8 @@ jobs:
       - name: Publish verified beta
         run: |
           $ErrorActionPreference = 'Stop'
-          $release = gh api "repos/$env:GH_REPO/releases/tags/$env:RELEASE_TAG" | ConvertFrom-Json
+          $releases = gh api "repos/$env:GH_REPO/releases?per_page=100" | ConvertFrom-Json
+          $release = $releases | Where-Object { $_.tag_name -eq $env:RELEASE_TAG } | Select-Object -First 1
           if ($LASTEXITCODE -ne 0 -or -not $release.draft) { throw 'Release is not a draft.' }
           $body = [IO.File]::ReadAllText((Join-Path $PWD ".github/release-notes/$env:RELEASE_TAG.md"))
           $payload = @{ draft = $false; prerelease = $true; target_commitish = $env:GITHUB_SHA; body = $body; make_latest = 'false' } | ConvertTo-Json
