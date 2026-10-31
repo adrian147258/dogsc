@@ -71,7 +71,7 @@ namespace DogSC.Replica {
   bool disposing,placing,ready;public bool Editing {get;private set;}public bool Excluded {get;private set;}
   public MemoWindow(MemoController owner,Window relativeTo){controller=owner;Title="DogSC · 备忘录";Width=390;Height=420;MinWidth=300;MinHeight=280;MaxWidth=760;MaxHeight=1000;
    WindowStyle=WindowStyle.None;ResizeMode=ResizeMode.NoResize;AllowsTransparency=true;Background=Brushes.Transparent;Topmost=true;ShowInTaskbar=false;ShowActivated=false;FontFamily=relativeTo.FontFamily;FontSize=12;Resources=UI.LightSurfaceResources(relativeTo.Resources);
-   Editing=string.IsNullOrEmpty(owner.Store.Draft.Text);
+   UI.TextClarity(this,true);Editing=string.IsNullOrEmpty(owner.Store.Draft.Text);
    var root=new Grid {Margin=new Thickness(7)};Content=root;
    paper=new Border {CornerRadius=new CornerRadius(20),BorderBrush=new SolidColorBrush(Color.FromArgb(204,255,255,255)),BorderThickness=new Thickness(1)};paper.Effect=new System.Windows.Media.Effects.DropShadowEffect {BlurRadius=12,Opacity=.15,ShadowDepth=3};root.Children.Add(paper);
    var grid=new Grid();grid.RowDefinitions.Add(new RowDefinition {Height=new GridLength(68)});grid.RowDefinitions.Add(new RowDefinition());grid.RowDefinitions.Add(new RowDefinition {Height=new GridLength(84)});paper.Child=grid;
@@ -146,7 +146,7 @@ namespace DogSC.Replica {
    try{memo.Hide();surface.Show();await Task.Delay(200);var hwnd=new WindowInteropHelper(surface).Handle;RECT rect;Check(GetClientRect(hwnd,out rect),"Test surface rect");Native.Point origin=new Native.Point();ClientToScreen(hwnd,ref origin);
     string crop="-offset_x "+origin.X+" -offset_y "+origin.Y+" -video_size "+(rect.Right-rect.Left)+"x"+(rect.Bottom-rect.Top);string baseline=Path.Combine(folder,"baseline.png"),control=Path.Combine(folder,"visible.png"),excluded=Path.Combine(folder,"excluded.png");await Capture(crop,baseline);
     memo.Store.Draft.Left=surface.Left+100;memo.Store.Draft.Top=surface.Top+70;memo.Show(surface);await Task.Delay(200);var mh=new WindowInteropHelper(panel).Handle;Check(SetWindowDisplayAffinity(mh,0),"Positive capture control affinity");await Task.Delay(200);await Capture(crop,control);
-    var transform=PresentationSource.FromVisual(surface).CompositionTarget.TransformToDevice;int x=(int)(200*transform.M11),y=(int)(200*transform.M22);
+    var transform=PresentationSource.FromVisual(surface).CompositionTarget.TransformToDevice;int x=(int)(120*transform.M11),y=(int)(120*transform.M22);
     using(var b=new System.Drawing.Bitmap(baseline))using(var c=new System.Drawing.Bitmap(control)){Check(Distance(b.GetPixel(x,y),c.GetPixel(x,y))>100,"Capture positive control did not see visible memo");}
     bool supported=panel.TryExclude();memo.BeginCapture();await Task.Delay(250);await Capture(crop,excluded);
     using(var b=new System.Drawing.Bitmap(baseline))using(var c=new System.Drawing.Bitmap(excluded)){Check(Distance(b.GetPixel(x,y),c.GetPixel(x,y))<15,"Memo leaked into real GDI recording");}

@@ -6,18 +6,22 @@
 
 面向 Windows 的录屏与轻量编辑工具：录制屏幕、整理时间线，让鼠标跟随、自动缩放和背景设计一起参与成片。
 
-**[下载 Windows 体验版](https://github.com/adrian147258/dogsc/releases/tag/v0.1.0-windows-beta.2)** · [全部 Releases](https://github.com/adrian147258/dogsc/releases) · [反馈问题](https://github.com/adrian147258/dogsc/issues) · [DogSC 原作](https://github.com/laogou717/dogsc)
+**[下载 Windows 体验版](https://github.com/adrian147258/dogsc/releases/tag/v0.1.0-windows-beta.3)** · [全部 Releases](https://github.com/adrian147258/dogsc/releases) · [反馈问题](https://github.com/adrian147258/dogsc/issues) · [DogSC 原作](https://github.com/laogou717/dogsc)
 
 ![Windows 编辑器：中央预览、右侧布局设置和时间线](docs/windows/editor.png)
 
 ## 下载与启动
 
-1. 打开 [Release 下载页](https://github.com/adrian147258/dogsc/releases/tag/v0.1.0-windows-beta.2)，下载名称带 **`win-x64.zip`** 的体验包。
-2. **完整解压**到一个可写文件夹，例如桌面。不要直接在压缩包里运行。
-3. 双击 `Windows/bin/DogSC.Windows.exe`；也可双击 `Start-DogSC.cmd`。
-4. 保留整个文件夹结构。EXE 依赖随附的 XAML、字体和录屏工具，不能单独拿出来使用。
+Windows Beta 3 提供安装程序、应用内检查更新，并改进播放速度、导出和鼠标跟随。安装版的新录屏保存在“文档/DogSC/recordings”；原 ZIP 版目录和录屏不自动移动，请继续保留原视频和项目，避免项目的素材路径失效。
 
-**运行环境：Windows 10/11 64 位、.NET Framework 4.8。** 下载包已包含 FFmpeg/ffprobe 与字体，无需额外安装录屏组件。当前没有安装器或代码签名。GitHub 自动附带的 **Source code** 是源码，不是可直接运行的体验包。
+1. 打开 [Release 下载页](https://github.com/adrian147258/dogsc/releases/tag/v0.1.0-windows-beta.3)，下载 **`dogsc-v0.1.0-windows-beta.3-setup-x64.exe`**。
+2. 运行安装程序，完成安装后从开始菜单打开 dogsc。
+
+也可下载 `win-x64.zip` 便携版：完整解压到可写文件夹后运行 `Windows/bin/DogSC.Windows.exe` 或 `Start-DogSC.cmd`，保留整个文件夹结构。安装版启动时会检查更新，也可通过左上角项目菜单手动检查。已有 Beta 1／2 用户需要先手动下载安装新版，之后才能使用应用内升级。
+
+**运行环境：Windows 10/11 64 位、.NET Framework 4.8。** 下载包已包含 FFmpeg/ffprobe 与字体，无需额外安装录屏组件。安装程序暂未签名，Windows 可能提示未知发布者。GitHub 自动附带的 **Source code** 是源码，不是可直接运行的体验包。
+
+更新通过 GitHub 获取，需要网络连接。用户确认后下载新版，校验文件大小和 SHA-256；关闭软件前会提示处理未保存项目。录制期间不能安装更新。SHA-256 校验用于核对下载完整性，不能替代代码签名。
 
 校验值在同一 Release 的 `SHA256SUMS.txt`。PowerShell 可用 `Get-FileHash .\下载的文件.zip -Algorithm SHA256` 核对。
 
@@ -112,7 +116,7 @@
 
 ## 素材与项目保存在哪里
 
-- **录制素材与初始项目**：程序所在目录的 `Windows/recordings/日期时间-随机编号/`。`source.mp4` 是原始视频，`project.dogscwin` 是编辑项目。
+- **录制素材与初始项目**：安装版位于“文档/DogSC/recordings/日期时间-随机编号/”；ZIP 版位于程序所在目录的 `Windows/recordings/日期时间-随机编号/`。`source.mp4` 是原始视频，`project.dogscwin` 是编辑项目。
 - **编辑改动**：使用 `Ctrl+S` 保存。停止录制已保存原素材，不需要额外点保存才能保留它。
 - **导出视频**：以导出窗口显示的目标文件夹为准。
 - **备忘录与帧率偏好**：当前用户的 `%LOCALAPPDATA%/DogSC.Windows/`。

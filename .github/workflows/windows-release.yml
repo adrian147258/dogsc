@@ -6,7 +6,7 @@ on:
       tag:
         description: Windows beta release tag
         required: true
-        default: v0.1.0-windows-beta.2
+        default: v0.1.0-windows-beta.3
         type: string
 
 permissions:
@@ -50,21 +50,37 @@ jobs:
       - name: Build and verify startup
         run: |
           $ErrorActionPreference = 'Stop'
+          [IO.File]::WriteAllText((Join-Path $PWD 'Windows/version.txt'), $env:RELEASE_TAG + "`n", [Text.UTF8Encoding]::new($false))
           & powershell -NoProfile -ExecutionPolicy Bypass -File Windows/build.ps1
           if ($LASTEXITCODE -ne 0) { throw 'Windows build failed.' }
           $app = Start-Process -FilePath (Join-Path $PWD 'Windows/bin/DogSC.Windows.exe') -ArgumentList '--snapshot' -WindowStyle Hidden -PassThru
           if (-not $app.WaitForExit(30000)) { Stop-Process -Id $app.Id; throw 'Startup check timed out.' }
           if ($app.ExitCode -ne 0 -or -not (Test-Path 'Windows/bin/editor-preview.png')) { throw 'Startup check failed.' }
+          $test = Start-Process -FilePath (Join-Path $PWD 'Windows/bin/DogSC.Windows.exe') -ArgumentList '--update-test' -WindowStyle Hidden -PassThru -Wait
+          if ($test.ExitCode -ne 0 -or -not ((Get-Content 'Windows/bin/update-results.txt' -Raw).StartsWith('PASS:'))) { throw 'Update checks failed.' }
+      - name: Prepare verified portable installer compiler
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $ProgressPreference = 'SilentlyContinue'
+          $tool = Join-Path $PWD 'Windows/tools/innosetup-6.7.4.exe'
+          Invoke-WebRequest -Uri 'https://github.com/jrsoftware/issrc/releases/download/is-6_7_4/innosetup-6.7.4.exe' -OutFile $tool
+          $signature = Get-AuthenticodeSignature -LiteralPath $tool
+          if ($signature.Status -ne 'Valid' -or $signature.SignerCertificate.Subject -notmatch 'CN=Pyrsys B\.V\.') { throw 'Inno Setup signature verification failed.' }
+          $compilerDir = Join-Path $PWD 'Windows/tools/inno-portable'
+          $install = Start-Process -FilePath $tool -ArgumentList @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/CURRENTUSER', '/PORTABLE=1', '/NOICONS', ('/DIR="' + $compilerDir + '"')) -WindowStyle Hidden -PassThru -Wait
+          if ($install.ExitCode -ne 0 -or -not (Test-Path (Join-Path $compilerDir 'ISCC.exe'))) { throw 'Inno Setup preparation failed.' }
       - name: Package, upload and verify draft assets
         run: |
           $ErrorActionPreference = 'Stop'
-          & powershell -NoProfile -ExecutionPolicy Bypass -File Windows/package.ps1
+          & powershell -NoProfile -ExecutionPolicy Bypass -File Windows/build-installer.ps1
           if ($LASTEXITCODE -ne 0) { throw 'Packaging failed.' }
           $folder = (Get-Content Windows/share/latest-package-path.txt -Raw).Trim()
           $outputFolder = Join-Path $PWD 'release-assets'
           New-Item -ItemType Directory -Path $outputFolder | Out-Null
           $zipName = "dogsc-$env:RELEASE_TAG-win-x64.zip"
           Copy-Item -LiteralPath "$folder.zip" -Destination (Join-Path $outputFolder $zipName)
+          $installerName = "dogsc-$env:RELEASE_TAG-setup-x64.exe"
+          Copy-Item -LiteralPath (Join-Path (Split-Path $folder) "installer-output/$installerName") -Destination (Join-Path $outputFolder $installerName)
           $sourceName = 'FFmpeg-946fcce07b-source.tar.gz'
           $sourceFile = Join-Path $outputFolder $sourceName
           Invoke-WebRequest -Uri "https://github.com/adrian147258/dogsc/releases/download/v0.1.0-windows-beta.1/$sourceName" -OutFile $sourceFile
@@ -78,7 +94,7 @@ jobs:
               if (-not ($paths | Where-Object { $_.EndsWith('/' + $asset) })) { throw "Missing runtime asset: $asset" }
             }
           } finally { $archive.Dispose() }
-          $assetNames = @($zipName, $sourceName)
+          $assetNames = @($installerName, $zipName, $sourceName)
           $lines = foreach ($name in $assetNames) { (Get-FileHash (Join-Path $outputFolder $name)).Hash.ToLowerInvariant() + '  ' + $name }
           [IO.File]::WriteAllText((Join-Path $outputFolder 'SHA256SUMS.txt'), ($lines -join "`n") + "`n", [Text.UTF8Encoding]::new($false))
           $assetNames += 'SHA256SUMS.txt'

@@ -11,6 +11,7 @@ $files = @{
     'bin/DogSC.Windows.exe.config' = 'Windows/bin/DogSC.Windows.exe.config'
     'Editor.xaml' = 'Windows/Editor.xaml'
     'EditorTheme.xaml' = 'Windows/EditorTheme.xaml'
+    'version.txt' = 'Windows/version.txt'
     'README.md' = 'Windows/README.md'
     'Trial-README.txt' = 'README.txt'
     'tools/ffmpeg.exe' = 'Windows/tools/ffmpeg.exe'

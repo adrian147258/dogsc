@@ -43,12 +43,11 @@ namespace DogSC.Replica {
    // Interpolate only within an uninterrupted pointer segment.
    if(index+1<pointers.Count&&pointers[index+1].Segment==point.Segment&&pointers[index+1].Visible&&pointers[index+1].Time-point.Time>0&&pointers[index+1].Time-point.Time<.1){var next=pointers[index+1];double f=EditDocument.Clamp((t-point.Time)/(next.Time-point.Time),0,1);pose.X+=(next.X-point.X)*f;pose.Y+=(next.Y-point.Y)*f;}
    if(c.Smoothing>.001){double sx=pose.X,sy=pose.Y,weight=1,window=.025+c.Smoothing*.14;for(int i=index;i>=0;i--){var p=pointers[i];double age=t-p.Time;if(age>window*4||!p.Visible||p.Segment!=point.Segment)break;double w=Math.Exp(-age/window);sx+=p.X*w;sy+=p.Y*w;weight+=w;}pose.X=sx/weight;pose.Y=sy/weight;}
-   double lastMove=point.Time;if(!point.Click)for(int i=index-1;i>=0;i--){var p=pointers[i];if(p.Segment!=point.Segment||!p.Visible||p.Click||Math.Abs(p.X-point.X)+Math.Abs(p.Y-point.Y)>.001){lastMove=pointers[Math.Min(i+1,index)].Time;break;}lastMove=p.Time;}
-   if(c.HideWhenIdle){double idle=t-lastMove;pose.Opacity=1-EditDocument.Clamp((idle-c.IdleDelay)/.15,0,1);if(pose.Opacity<.001)pose.Visible=false;}
+   if(c.HideWhenIdle){double lastMove=point.Time;if(!point.Click)for(int i=index-1;i>=0;i--){var p=pointers[i];if(p.Segment!=point.Segment||!p.Visible||p.Click||Math.Abs(p.X-point.X)+Math.Abs(p.Y-point.Y)>.001){lastMove=pointers[Math.Min(i+1,index)].Time;break;}lastMove=p.Time;if(t-lastMove>=c.IdleDelay+.15)break;}double idle=t-lastMove;pose.Opacity=1-EditDocument.Clamp((idle-c.IdleDelay)/.15,0,1);if(pose.Opacity<.001)pose.Visible=false;}
    if(c.Tilt&&index>0){var previous=pointers[index-1];double dt=point.Time-previous.Time;if(dt>.001&&dt<.2)pose.Angle=EditDocument.Clamp((point.X-previous.X)/dt*18*c.TiltStrength,-28,28);}
    return pose;
   }
-  public IEnumerable<PointerSample> RecentClicks(double time,double duration){double t=time-doc.Cursor.TimeOffset;return pointers.Where(p=>p.Click&&p.Visible&&t>=p.Time&&t-p.Time<duration);}
+  public IEnumerable<PointerSample> RecentClicks(double time,double duration){double t=time-doc.Cursor.TimeOffset;int lo=0,hi=clicks.Length;while(lo<hi){int mid=(lo+hi)/2;if(clicks[mid].Time<=t-duration)lo=mid+1;else hi=mid;}for(int i=lo;i<clicks.Length&&clicks[i].Time<=t;i++)yield return clicks[i];}
   public void Dispose(){foreach(var image in images.Values)image.Dispose();images.Clear();}
  }
  static class EffectModels {

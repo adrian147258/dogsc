@@ -173,102 +173,6 @@ namespace DogSC.Windows {
    }
   }
  }
- public class RecorderForm : Form {
-  ComboBox screen=new ComboBox(), fps=new ComboBox(), theme=new ComboBox();
-  Button record=new Button(), stop=new Button(), open=new Button(), export=new Button(), play=new Button(), regionButton=new Button();
-  CheckBox autoZoom=new CheckBox(); NumericUpDown scale=new NumericUpDown(), trimStart=new NumericUpDown(), trimEnd=new NumericUpDown();
-  Label status=new Label(); ProgressBar bar=new ProgressBar(); FlowLayoutPanel settings=new FlowLayoutPanel();
-  System.Windows.Forms.Timer timer=new System.Windows.Forms.Timer(); Stopwatch watch=new Stopwatch();
-  Process capture; Task<string> captureErrors; Project project; string projectFile; Rectangle region; bool left, right, busy;
-  CancellationTokenSource cancellation;
-  public RecorderForm() {
-   Text="DogSC · Windows 原型"; ClientSize=new Size(820,570); MinimumSize=new Size(760,610); BackColor=Color.FromArgb(24,27,40); ForeColor=Color.White; Font=new Font("Microsoft YaHei UI",10);
-   var title=new Label {Text="DogSC  /  WINDOWS",Font=new Font(Font.FontFamily,22,FontStyle.Bold),AutoSize=true,Location=new Point(28,24)}; Controls.Add(title);
-   Controls.Add(new Label {Text="录制 → 自动运镜 → 渐变背景 → MP4",AutoSize=true,Location=new Point(30,78),ForeColor=Color.LightSteelBlue});
-   settings.Location=new Point(28,118); settings.Size=new Size(760,280); settings.FlowDirection=FlowDirection.TopDown; settings.WrapContents=false; Controls.Add(settings);
-   screen.DropDownStyle=ComboBoxStyle.DropDownList; screen.Width=320;
-   foreach(var s in Screen.AllScreens) screen.Items.Add(s.DeviceName+"  "+s.Bounds.Width+" × "+s.Bounds.Height); screen.SelectedIndex=0;
-   screen.SelectedIndexChanged+=(s,e)=>{region=Screen.AllScreens[screen.SelectedIndex].Bounds; regionButton.Text="框选区域";}; region=Screen.AllScreens[0].Bounds;
-   fps.DropDownStyle=ComboBoxStyle.DropDownList; fps.Width=95; fps.Items.AddRange(new object[]{"30 FPS","60 FPS"}); fps.SelectedIndex=0;
-   regionButton.Text="框选区域"; regionButton.Width=150; regionButton.Click+=(s,e)=>ChooseRegion();
-   settings.Controls.Add(Row("录制范围",screen,regionButton,fps));
-   autoZoom.Text="点击自动缩放 + 鼠标跟随"; autoZoom.Checked=true; autoZoom.Width=295;
-   scale.Minimum=1; scale.Maximum=3; scale.DecimalPlaces=1; scale.Increment=.1m; scale.Value=1.6m; scale.Width=65;
-   settings.Controls.Add(Row("自动运镜",autoZoom,scale));
-   theme.DropDownStyle=ComboBoxStyle.DropDownList; theme.Items.AddRange(new object[]{"暮色紫","海湾青","落日橙"}); theme.SelectedIndex=0;
-   foreach(var combo in new[]{screen,fps,theme}) {
-    combo.ForeColor=Color.Black;combo.DrawMode=DrawMode.OwnerDrawFixed;combo.ItemHeight=24;
-    combo.DrawItem+=(s,e)=>{var control=(ComboBox)s;int i=e.Index<0?control.SelectedIndex:e.Index;e.Graphics.FillRectangle(SystemBrushes.Window,e.Bounds);if(i>=0)TextRenderer.DrawText(e.Graphics,control.Items[i].ToString(),control.Font,e.Bounds,Color.Black,TextFormatFlags.VerticalCenter|TextFormatFlags.EndEllipsis);e.DrawFocusRectangle();};
-   }
-   settings.Controls.Add(Row("导出背景",theme,new Label {Text="圆角 · 阴影 · 720p / 30 FPS",AutoSize=true}));
-   foreach(var n in new[]{trimStart,trimEnd}) {n.DecimalPlaces=2;n.Maximum=86400;n.Width=110;}
-   settings.Controls.Add(Row("保留范围",trimStart,new Label {Text="秒  →",AutoSize=true},trimEnd,new Label {Text="秒",AutoSize=true}));
-   settings.Controls.Add(new Label {Text="原型：无音频采集、摄像头和多轨编辑；鼠标已录入素材。\n使用独立 Windows 项目格式，暂不兼容原版项目。\n导入视频中的已有音轨会保留。",Size=new Size(740,70),Font=new Font(Font.FontFamily,9),ForeColor=Color.LightSteelBlue,Margin=new Padding(0,10,0,0)});
-   var actions=new FlowLayoutPanel {Location=new Point(28,405),Size=new Size(760,52)}; Controls.Add(actions);
-   record.Text="开始录制"; stop.Text="停止录制"; open.Text="打开项目"; play.Text="播放素材"; export.Text="导出成片";
-   foreach(var b in new[]{record,stop,open,play,export}) {b.Size=new Size(135,42); b.FlatStyle=FlatStyle.Flat; b.BackColor=Color.FromArgb(49,55,80); actions.Controls.Add(b);}
-   record.BackColor=Color.FromArgb(107,77,211);
-   record.Click+=async(s,e)=>await StartRecording(); stop.Click+=async(s,e)=>{if(cancellation!=null){cancellation.Cancel();return;} await StopRecording();};
-   open.Click+=(s,e)=>OpenProject(); play.Click+=(s,e)=>{try{Process.Start(Source());}catch(Exception ex){ShowError(ex);}};
-   export.Click+=async(s,e)=>await Export();
-   status.Location=new Point(28,470); status.Size=new Size(760,48); status.Text="就绪。录制时窗口会最小化；返回窗口点击停止。"; Controls.Add(status);
-   bar.Location=new Point(28,530); bar.Size=new Size(760,10); Controls.Add(bar);
-   timer.Interval=33; timer.Tick+=(s,e)=>SamplePointer();
-   FormClosing+=async(s,e)=>{if(capture!=null || busy) {e.Cancel=true;if(cancellation!=null){cancellation.Cancel();status.Text="正在取消导出，请稍后关闭。";}else{await StopRecording();}}}; UpdateButtons();
-  }
-  FlowLayoutPanel Row(string label,params Control[] items) {var r=new FlowLayoutPanel {Width=750,Height=44};r.Controls.Add(new Label {Text=label,Width=95,Margin=new Padding(0,7,4,0)});foreach(var c in items)r.Controls.Add(c);return r;}
-  void ShowError(Exception ex) {status.Text="操作失败";MessageBox.Show(this,ex.Message,"DogSC",MessageBoxButtons.OK,MessageBoxIcon.Error);}
-  string Source() {return Path.Combine(Path.GetDirectoryName(projectFile),project.Video);}
-  void UpdateButtons() {bool running=capture!=null;record.Enabled=!running&&!busy;open.Enabled=!running&&!busy;play.Enabled=projectFile!=null&&!running&&!busy;export.Enabled=play.Enabled;settings.Enabled=!running&&!busy;stop.Enabled=running||cancellation!=null;stop.Text=cancellation!=null?"取消导出":"停止录制";}
-  void ChooseRegion() {Hide();using(var selector=new RegionSelector(Screen.AllScreens[screen.SelectedIndex].Bounds)){if(selector.ShowDialog()==DialogResult.OK){region=selector.Selection;regionButton.Text=region.Width+" × "+region.Height;}}Show();}
-  async Task StartRecording() {
-   busy=true; UpdateButtons();
-   try {
-    Media.Tool("ffmpeg");Media.Tool("ffprobe");region.Width-=region.Width%2;region.Height-=region.Height%2;if(region.Width<2||region.Height<2)throw new Exception("录制区域过小。");
-    string folder=Path.Combine(Media.Root,"recordings",DateTime.Now.ToString("yyyyMMdd-HHmmss")+"-"+Guid.NewGuid().ToString("N").Substring(0,6));Directory.CreateDirectory(folder);
-    projectFile=Path.Combine(folder,"project.dogscwin");project=new Project {Width=region.Width,Height=region.Height};
-    string args="-hide_banner -y -f gdigrab -framerate "+(fps.SelectedIndex==0?30:60)+" -draw_mouse 1 -offset_x "+region.X+" -offset_y "+region.Y+" -video_size "+region.Width+"x"+region.Height+" -i desktop -vf pad=ceil(iw/2)*2:ceil(ih/2)*2 -c:v libx264 -preset ultrafast -crf 18 -pix_fmt yuv420p -movflags +faststart "+Media.Q(Source());
-    WindowState=FormWindowState.Minimized; await Task.Delay(600);
-    capture=Media.Start("ffmpeg",args,false);captureErrors=capture.StandardError.ReadToEndAsync();watch.Restart();left=(Native.GetAsyncKeyState(1)&0x8000)!=0;right=(Native.GetAsyncKeyState(2)&0x8000)!=0;timer.Start();status.Text="录制中… 返回本窗口可停止。";
-   } catch(Exception ex) {WindowState=FormWindowState.Normal;projectFile=null;ShowError(ex);} finally {busy=false;UpdateButtons();}
-  }
-  async void SamplePointer() {
-   if(capture==null)return;
-   if(capture.HasExited){await StopRecording();return;}
-   Native.Point p; bool l=(Native.GetAsyncKeyState(1)&0x8000)!=0,r=(Native.GetAsyncKeyState(2)&0x8000)!=0;
-   if(Native.GetCursorPos(out p) && region.Contains(p.X,p.Y)) project.Pointer.Add(new PointerSample {Time=watch.Elapsed.TotalSeconds,X=(double)(p.X-region.X)/region.Width,Y=(double)(p.Y-region.Y)/region.Height,Click=(l&&!left)||(r&&!right)});
-   left=l;right=r;status.Text="录制中  "+watch.Elapsed.ToString(@"hh\:mm\:ss")+"  · 点击停止后保存项目";
-  }
-  async Task StopRecording() {
-   if(capture==null)return;timer.Stop();watch.Stop();var p=capture;capture=null;busy=true;UpdateButtons();status.Text="正在写入 MP4…";
-   try {
-    await Task.Run(()=>{if(!p.HasExited){p.StandardInput.WriteLine("q");p.StandardInput.Flush();if(!p.WaitForExit(15000)){p.Kill();throw new Exception("编码器未能正常结束，素材保留在录制目录，请检查。");}}});
-    if(p.ExitCode!=0)throw new Exception("录制失败："+await captureErrors);
-    project.Duration=await Task.Run(()=>Media.Duration(Source()));project.Save(projectFile);trimStart.Value=0;trimEnd.Value=(decimal)Math.Min(86400,project.Duration);status.Text="已保存项目："+projectFile;
-   }catch(Exception ex){projectFile=null;ShowError(ex);}finally{p.Dispose();busy=false;WindowState=FormWindowState.Normal;UpdateButtons();}
-  }
-  void OpenProject() {
-   using(var dlg=new OpenFileDialog {Filter="Windows 项目|*.dogscwin|视频素材|*.mp4;*.mov;*.mkv"}) if(dlg.ShowDialog()==DialogResult.OK) {
-    try {
-     if(Path.GetExtension(dlg.FileName).Equals(".dogscwin",StringComparison.OrdinalIgnoreCase)){var loaded=Project.Load(dlg.FileName);if(!File.Exists(Path.Combine(Path.GetDirectoryName(dlg.FileName),loaded.Video)))throw new Exception("项目素材不存在。");project=loaded;projectFile=dlg.FileName;}
-     else {var duration=Media.Duration(dlg.FileName); project=new Project {Duration=duration,Video=Path.GetFileName(dlg.FileName)};
-      using(var p=Media.Start("ffprobe","-v error -select_streams v:0 -show_entries stream=width,height -of csv=s=x:p=0 "+Media.Q(dlg.FileName),true)){var err=p.StandardError.ReadToEndAsync();var size=p.StandardOutput.ReadToEnd().Trim().Split('x');p.WaitForExit();if(p.ExitCode!=0||size.Length!=2)throw new Exception("无法读取视频尺寸。"+err.Result);project.Width=int.Parse(size[0]);project.Height=int.Parse(size[1]);}
-      projectFile=Path.Combine(Path.GetDirectoryName(dlg.FileName),"import.dogscwin");}
-     trimStart.Value=0;trimEnd.Value=(decimal)Math.Min(86400,project.Duration);status.Text="已打开："+dlg.FileName+(project.Pointer.Count==0?"（无鼠标轨迹，仅添加背景）":"");UpdateButtons();
-    }catch(Exception ex){ShowError(ex);}
-   }
-  }
-  async Task Export() {
-   double start=(double)trimStart.Value,end=(double)trimEnd.Value;if(end<=start||end>project.Duration+.05){ShowError(new Exception("请设置有效的保留范围。"));return;}
-   using(var dlg=new SaveFileDialog {Filter="MP4 视频|*.mp4",FileName="DogSC-成片.mp4",OverwritePrompt=true}) if(dlg.ShowDialog()==DialogResult.OK) {
-    if(File.Exists(dlg.FileName)){ShowError(new Exception("请选择新文件名，原型不会覆盖现有视频。"));return;}
-    busy=true;cancellation=new CancellationTokenSource();UpdateButtons();bar.Value=0;status.Text="正在渲染自动运镜和背景…";
-    bool zoom=autoZoom.Checked;double amount=(double)scale.Value;int background=theme.SelectedIndex;
-    try {await Task.Run(()=>Renderer.Export(project,Source(),dlg.FileName,start,end-start,zoom,amount,background,v=>BeginInvoke(new Action(()=>{bar.Value=v;status.Text="正在导出 "+v+"%";})),cancellation.Token));status.Text="导出完成："+dlg.FileName;}
-    catch(OperationCanceledException){status.Text="已取消导出，项目仍保留。";}catch(Exception ex){ShowError(ex);}finally{cancellation.Dispose();cancellation=null;busy=false;UpdateButtons();}
-   }
-  }
- }
  class RegionSelector : Form {
   Point anchor; Rectangle selected; bool dragging; public Rectangle Selection;
   public RegionSelector(Rectangle bounds) {FormBorderStyle=FormBorderStyle.None;StartPosition=FormStartPosition.Manual;Bounds=bounds;BackColor=Color.Black;Opacity=.45;TopMost=true;Cursor=Cursors.Cross;DoubleBuffered=true;KeyPreview=true;
@@ -278,14 +182,6 @@ namespace DogSC.Windows {
    MouseUp+=(s,e)=>{dragging=false;if(selected.Width<16||selected.Height<16)return;Selection=new Rectangle(bounds.X+selected.X,bounds.Y+selected.Y,selected.Width,selected.Height);DialogResult=DialogResult.OK;Close();};
   }
   protected override void OnPaint(PaintEventArgs e) {base.OnPaint(e);using(var pen=new Pen(Color.White,3))e.Graphics.DrawRectangle(pen,selected);e.Graphics.DrawString("拖动框选录制区域 · Esc 取消",Font,Brushes.White,20,20);}
- }
- static class Program {
-  [STAThread] static void Main(string[] args) {
-   Native.SetProcessDPIAware();
-   if(args.Length>0&&args[0]=="--ui-snapshot") {Application.EnableVisualStyles();using(var f=new RecorderForm()){f.StartPosition=FormStartPosition.Manual;f.Location=new Point(-32000,-32000);f.Show();Application.DoEvents();using(var b=new Bitmap(f.Width,f.Height)){f.DrawToBitmap(b,new Rectangle(0,0,b.Width,b.Height));b.Save(Path.Combine(Media.Root,"bin","ui.png"));}f.Close();}return;}
-   if(args.Length>0&&args[0]=="--smoke-test") { SmokeTest.Run();return; }
-   Application.EnableVisualStyles();Application.SetCompatibleTextRenderingDefault(false);Application.Run(new RecorderForm());
-  }
  }
  static class SmokeTest {
   public static void Run() {
